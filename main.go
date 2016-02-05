@@ -56,7 +56,7 @@ func main() {
 			name := ""
 			for _, keys := range inst.Tags {
 				if *keys.Key == "Name" {
-					name = *keys.Value
+					name = fmt.Sprintf("%s_%s", *keys.Value, *inst.InstanceId)
 					break
 				}
 			}
