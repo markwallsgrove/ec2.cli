@@ -14,6 +14,7 @@ import (
 func main() {
 	certificateLocation := flag.String("cert", "", "SSH certificate location")
 	awsRegion := flag.String("region", "eu-west-1", "AWS region")
+	namePrefix := flag.String("prefix", "", "Prefix for server name")
 
 	flag.Usage = func() {
 		fmt.Printf("Usage %s [OPTION] [USER]\n", os.Args[0])
@@ -67,7 +68,7 @@ func main() {
 
 			if name != "" && addr != nil {
 				name = regexWhiteChars.ReplaceAllString(name, "_")
-				fmt.Println(fmt.Sprintf("alias %s=\"ssh%s %s@%s\"", strings.ToLower(name), sshCertificateLocation, user, *addr))
+				fmt.Println(fmt.Sprintf("alias %s%s=\"ssh%s %s@%s\"", *namePrefix, strings.ToLower(name), sshCertificateLocation, user, *addr))
 			}
 		}
 	}
