@@ -75,8 +75,6 @@ func getInstances(region string) (error, map[string]*Instance) {
 }
 
 func main() {
-	// TODO: status of a machine
-
 	app := cli.NewApp()
 	app.EnableBashCompletion = true
 
