@@ -119,7 +119,6 @@ func main() {
 		{
 			Name:   "ssh",
 			Usage:  "ssh to a given machine",
-			Flags:  []cli.Flag{},
 			Action: actionSSH,
 			BashComplete: func(c *cli.Context) {
 				if len(c.Args()) > 0 {
