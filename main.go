@@ -55,6 +55,8 @@ type Instance struct {
 	addr          string
 	id            string
 	publicDnsName string
+	instanceType  string
+	certName      string
 }
 
 func (i *Instance) getNormalisedName() string {
@@ -93,6 +95,8 @@ func getInstances(region string) (error, map[string]*Instance) {
 			}
 
 			instance.publicDnsName = *inst.PublicDnsName
+			instance.instanceType = *inst.InstanceType
+			instance.certName = *inst.KeyName
 
 			if inst.PublicIpAddress != nil {
 				instance.addr = *inst.PublicIpAddress
@@ -310,7 +314,7 @@ func actionSSH(c *cli.Context) {
 
 func actionStatus(c *cli.Context) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Id", "Name", "Address", "Public DNS Name"})
+	table.SetHeader([]string{"Id", "Name", "Cert", "Type", "URL"})
 
 	err, instances := getInstances(c.GlobalString("region"))
 	if err != nil {
@@ -320,7 +324,8 @@ func actionStatus(c *cli.Context) {
 	for _, instance := range instances {
 		table.Append([]string{
 			instance.id, instance.name,
-			instance.addr, instance.publicDnsName,
+			instance.certName, instance.instanceType,
+			instance.publicDnsName,
 		})
 	}
 
