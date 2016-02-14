@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -14,7 +16,9 @@ import (
 	"os/exec"
 	"os/user"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 var bashrcCall = []byte(`
@@ -51,16 +55,16 @@ fi
 var regexWhiteChars = regexp.MustCompile("[^a-zA-Z0-9]")
 
 type Instance struct {
-	name          string
-	addr          string
-	id            string
-	publicDnsName string
-	instanceType  string
-	certName      string
+	Name          string
+	Addr          string
+	Id            string
+	PublicDnsName string
+	InstanceType  string
+	CertName      string
 }
 
 func (i *Instance) getNormalisedName() string {
-	return fmt.Sprintf("%s_%s", regexWhiteChars.ReplaceAllString(i.name, "_"), i.id)
+	return fmt.Sprintf("%s_%s", regexWhiteChars.ReplaceAllString(i.Name, "_"), i.Id)
 }
 
 func exit(msg string) {
@@ -68,7 +72,71 @@ func exit(msg string) {
 	os.Exit(1)
 }
 
-func getInstances(region string) (error, map[string]*Instance) {
+func getInstanceCache(region string, aeDir string, maxAge int) map[string]*Instance {
+	cacheLocation := fmt.Sprintf("%s/cache/%s.cache", aeDir, region)
+	if info, err := os.Stat(cacheLocation); err != nil {
+		return nil
+	} else if maxAge == 0 {
+		os.Remove(cacheLocation)
+		return nil
+	} else if int(time.Since(info.ModTime()).Seconds()) > maxAge {
+		return nil
+	}
+
+	contents, err := ioutil.ReadFile(cacheLocation)
+	if err != nil {
+		return nil
+	}
+
+	buffer := bytes.Buffer{}
+	buffer.Write(contents)
+
+	cache := map[string]*Instance{}
+	d := gob.NewDecoder(&buffer)
+	err = d.Decode(&cache)
+
+	if err != nil {
+		return nil
+	}
+
+	return cache
+}
+
+func storeInstanceCache(region string, aeDir string, cache map[string]*Instance) error {
+	if err := os.MkdirAll(fmt.Sprintf("%s/cache", aeDir), 0770); err != nil {
+		return err
+	}
+
+	cacheLocation := fmt.Sprintf("%s/cache/%s.cache", aeDir, region)
+
+	buffer := bytes.Buffer{}
+	encoder := gob.NewEncoder(&buffer)
+	err := encoder.Encode(cache)
+
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(cacheLocation, buffer.Bytes(), 0770)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getInstances(region string, maxCacheAge int) (error, map[string]*Instance) {
+	user, err := user.Current()
+	if err != nil {
+		panic(err)
+	}
+
+	aeDir := fmt.Sprintf("%s/.ae", user.HomeDir)
+	instances := getInstanceCache(region, aeDir, maxCacheAge)
+	if instances != nil {
+		return nil, instances
+	}
+
 	config := aws.Config{}
 	if region != "" {
 		config.Region = aws.String(region)
@@ -81,33 +149,37 @@ func getInstances(region string) (error, map[string]*Instance) {
 		return err, nil
 	}
 
-	instances := make(map[string]*Instance)
+	instances = make(map[string]*Instance)
 	for _, res := range resp.Reservations {
 		for _, inst := range res.Instances {
 			instance := new(Instance)
 
 			for _, keys := range inst.Tags {
 				if *keys.Key == "Name" {
-					instance.name = *keys.Value
-					instance.id = *inst.InstanceId
+					instance.Name = *keys.Value
+					instance.Id = *inst.InstanceId
 					break
 				}
 			}
 
-			instance.publicDnsName = *inst.PublicDnsName
-			instance.instanceType = *inst.InstanceType
-			instance.certName = *inst.KeyName
+			instance.PublicDnsName = *inst.PublicDnsName
+			instance.InstanceType = *inst.InstanceType
+			instance.CertName = *inst.KeyName
 
 			if inst.PublicIpAddress != nil {
-				instance.addr = *inst.PublicIpAddress
+				instance.Addr = *inst.PublicIpAddress
 			} else if inst.PrivateIpAddress != nil {
-				instance.addr = *inst.PrivateIpAddress
+				instance.Addr = *inst.PrivateIpAddress
 			}
 
-			if instance.name != "" && instance.addr != "" {
+			if instance.Name != "" && instance.Addr != "" {
 				instances[instance.getNormalisedName()] = instance
 			}
 		}
+	}
+
+	if err = storeInstanceCache(region, aeDir, instances); err != nil {
+		return err, nil
 	}
 
 	return nil, instances
@@ -121,19 +193,29 @@ func main() {
 		cli.StringFlag{
 			Name:   "region",
 			Value:  "eu-west-1",
-			EnvVar: "AWS_DEFAULT_REGION",
+			EnvVar: "AE_AWS_DEFAULT_REGION",
 			Usage:  "AWS region",
 		},
 		cli.StringFlag{
 			Name:   "user",
 			Usage:  "SSH username",
-			EnvVar: "SSH_USER,USER",
+			EnvVar: "AE_SSH_USER,USER",
 		},
 		cli.StringFlag{
 			Name:   "cert",
 			Value:  "~/.ssh/id_rsa",
 			Usage:  "Certificate used when ssh'ing",
-			EnvVar: "SSH_CERTIFICATE",
+			EnvVar: "AE_SSH_CERTIFICATE",
+		},
+		cli.StringFlag{
+			Name:   "maxCacheAge",
+			Value:  "300",
+			Usage:  "Maximum cache age in seconds",
+			EnvVar: "AE_MAX_CACHE_AGE",
+		},
+		cli.BoolFlag{
+			Name:  "flushCache",
+			Usage: "Flush the cache",
 		},
 	}
 
@@ -150,7 +232,7 @@ func main() {
 				cli.StringFlag{
 					Name:   "prefix",
 					Usage:  "Prefix for the alias name",
-					EnvVar: "SSH_ALIAS_PREFIX",
+					EnvVar: "AE_SSH_ALIAS_PREFIX",
 				},
 			},
 			Action: actionAlias,
@@ -161,15 +243,25 @@ func main() {
 			Action: actionStatus,
 		},
 		{
-			Name:   "ssh",
-			Usage:  "ssh to a given machine",
+			Name:  "ssh",
+			Usage: "ssh to a given machine",
+
 			Action: actionSSH,
 			BashComplete: func(c *cli.Context) {
 				if len(c.Args()) > 0 {
 					return
 				}
 
-				err, instances := getInstances(c.GlobalString("region"))
+				maxCacheAge, err := strconv.Atoi(c.GlobalString("maxCacheAge"))
+				if err != nil {
+					exit("maxCacheAge must be a integer")
+				}
+
+				if c.GlobalBool("flushCache") == true {
+					maxCacheAge = 0
+				}
+
+				err, instances := getInstances(c.GlobalString("region"), maxCacheAge)
 				if err != nil {
 					panic(err)
 				}
@@ -280,14 +372,20 @@ func actionSSH(c *cli.Context) {
 		exit("ssh <instance-name>")
 	}
 
-	err, instances := getInstances(c.GlobalString("region"))
+	maxCacheAge, err := strconv.Atoi(c.GlobalString("maxCacheAge"))
 	if err != nil {
-		panic(err)
+		exit("maxCacheAge must be a integer")
 	}
+
+	if c.GlobalBool("flushCache") == true {
+		maxCacheAge = 0
+	}
+
+	err, instances := getInstances(c.GlobalString("region"), maxCacheAge)
 
 	var host string
 	if instance, ok := instances[c.Args().First()]; ok {
-		host = instance.addr
+		host = instance.Addr
 	} else {
 		exit(fmt.Sprintf("Unknown instance: %s\n%+v", c.Args().First(), instances))
 	}
@@ -316,16 +414,25 @@ func actionStatus(c *cli.Context) {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Id", "Name", "Cert", "Type", "URL"})
 
-	err, instances := getInstances(c.GlobalString("region"))
+	maxCacheAge, err := strconv.Atoi(c.GlobalString("maxCacheAge"))
+	if err != nil {
+		exit("maxCacheAge must be a integer")
+	}
+
+	if c.GlobalBool("flushCache") == true {
+		maxCacheAge = 0
+	}
+
+	err, instances := getInstances(c.GlobalString("region"), maxCacheAge)
 	if err != nil {
 		panic(err)
 	}
 
 	for _, instance := range instances {
 		table.Append([]string{
-			instance.id, instance.name,
-			instance.certName, instance.instanceType,
-			instance.publicDnsName,
+			instance.Id, instance.Name,
+			instance.CertName, instance.InstanceType,
+			instance.PublicDnsName,
 		})
 	}
 
@@ -344,18 +451,27 @@ func actionAlias(c *cli.Context) {
 		sshCertificateLocation = fmt.Sprintf(" -i %s", c.GlobalString("cert"))
 	}
 
-	err, instances := getInstances(c.GlobalString("region"))
+	maxCacheAge, err := strconv.Atoi(c.GlobalString("maxCacheAge"))
+	if err != nil {
+		exit("maxCacheAge must be a integer")
+	}
+
+	if c.GlobalBool("flushCache") == true {
+		maxCacheAge = 0
+	}
+
+	err, instances := getInstances(c.GlobalString("region"), maxCacheAge)
 	if err != nil {
 		panic(err)
 	}
 
 	for _, instance := range instances {
-		name := fmt.Sprintf("%s_%s", instance.name, instance.id)
+		name := fmt.Sprintf("%s_%s", instance.Name, instance.Id)
 		name = regexWhiteChars.ReplaceAllString(name, "_")
 
 		fmt.Println(fmt.Sprintf(
 			"alias %s%s=\"ssh%s %s@%s\"", c.String("prefix"), strings.ToLower(name),
-			sshCertificateLocation, user, instance.addr,
+			sshCertificateLocation, user, instance.Addr,
 		))
 	}
 }
