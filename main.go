@@ -6,12 +6,47 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/codegangsta/cli"
+	"github.com/kardianos/osext"
 	"github.com/olekukonko/tablewriter"
+	"io"
+	"io/ioutil"
 	"os"
 	"os/exec"
+	"os/user"
 	"regexp"
 	"strings"
 )
+
+var bashrcCall = []byte(`
+if [ -f ~/.ae-completion.bash ]; then
+	export PATH="$PATH:$HOME/.ae"
+    . ~/.ae-completion.bash
+fi
+`)
+
+var bashAutoComplete = []byte(`#! /bin/bash
+_cli_bash_autocomplete() {
+     local cur opts base
+     COMPREPLY=()
+     cur="${COMP_WORDS[COMP_CWORD]}"
+     opts=$( ${COMP_WORDS[@]:0:$COMP_CWORD} --generate-bash-completion )
+     COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+     return 0
+}
+
+complete -F _cli_bash_autocomplete ae
+`)
+
+var zshAutoComplete = []byte(`
+autoload -U compinit && compinit
+autoload -U bashcompinit && bashcompinit
+
+export PATH="$PATH:$HOME/.ae"
+script_dir=$(dirname $0)
+if [ -f ~/.ae-completion.bash ]; then
+	source ~/.ae-completion.bash
+fi
+`)
 
 var regexWhiteChars = regexp.MustCompile("[^a-zA-Z0-9]")
 
@@ -100,6 +135,11 @@ func main() {
 
 	app.Commands = []cli.Command{
 		{
+			Name:   "setup-auto-complete",
+			Usage:  "Setup auto complete (requires sudo)",
+			Action: actionSetup,
+		},
+		{
 			Name:  "alias",
 			Usage: "generate aliases for all ec2 instances",
 			Flags: []cli.Flag{
@@ -138,6 +178,97 @@ func main() {
 	}
 
 	app.Run(os.Args)
+}
+
+func writeConfig(loc string, content []byte) error {
+	if _, err := os.Stat(loc); os.IsNotExist(err) {
+		ioutil.WriteFile(loc, content, 0770)
+		fmt.Println(fmt.Sprintf("created %s", loc))
+		return nil
+	}
+
+	config, err := os.OpenFile(loc, os.O_APPEND|os.O_WRONLY, 0770)
+	if err != nil {
+		return err
+	}
+
+	defer config.Close()
+
+	if _, err = config.Write(content); err != nil {
+		return err
+	}
+
+	if err = os.Chmod(loc, 0770); err != nil {
+		return err
+	}
+
+	fmt.Println(fmt.Sprintf("appended to %s", loc))
+	return nil
+}
+
+func cp(src, dst string) error {
+	s, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+
+	defer s.Close()
+	d, err := os.Create(dst)
+
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(d, s); err != nil {
+		d.Close()
+		return err
+	}
+
+	return d.Close()
+}
+
+func actionSetup(c *cli.Context) {
+	user, err := user.Current()
+	if err != nil {
+		panic(err)
+	}
+
+	aeDirectory := fmt.Sprintf("%s/.ae", user.HomeDir)
+	aeCompletionLoc := fmt.Sprintf("%s/ae-completion.bash", aeDirectory)
+	aeExecLoc := fmt.Sprintf("%s/ae", aeDirectory)
+	bashrcLoc := fmt.Sprintf("%s/.bashrc", user.HomeDir)
+	zshrcLoc := fmt.Sprintf("%s/.zshrc", user.HomeDir)
+
+	if err = os.Mkdir(aeDirectory, 0775); os.IsExist(err) {
+		exit("ae is already installed, remove ~/.ae and try again")
+	} else if err != nil {
+		panic(err)
+	} else {
+		fmt.Println(fmt.Sprintf("created %s", aeDirectory))
+	}
+
+	currExecLoc, _ := osext.Executable()
+	if err = cp(currExecLoc, aeExecLoc); err != nil {
+		panic(err)
+	}
+
+	if err = os.Chmod(aeExecLoc, 0775); err != nil {
+		panic(err)
+	}
+
+	if err = ioutil.WriteFile(aeCompletionLoc, bashAutoComplete, 0775); err != nil {
+		panic(err)
+	}
+
+	if err = writeConfig(bashrcLoc, bashrcCall); err != nil {
+		panic(err)
+	}
+
+	if _, err := os.Stat(zshrcLoc); err == nil {
+		if err = writeConfig(zshrcLoc, zshAutoComplete); err != nil {
+			panic(err)
+		}
+	}
 }
 
 func actionSSH(c *cli.Context) {
