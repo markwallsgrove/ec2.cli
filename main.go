@@ -22,9 +22,9 @@ import (
 )
 
 var bashrcCall = []byte(`
-if [ -f ~/.ae-completion.bash ]; then
+if [ -f ~/.ae/ae-completion.bash ]; then
 	export PATH="$PATH:$HOME/.ae"
-    . ~/.ae-completion.bash
+    . ~/.ae/ae-completion.bash
 fi
 `)
 
@@ -47,8 +47,8 @@ autoload -U bashcompinit && bashcompinit
 
 export PATH="$PATH:$HOME/.ae"
 script_dir=$(dirname $0)
-if [ -f ~/.ae-completion.bash ]; then
-	source ~/.ae-completion.bash
+if [ -f ~/.ae/.ae-completion.bash ]; then
+	source ~/.ae/ae-completion.bash
 fi
 `)
 
