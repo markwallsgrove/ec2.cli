@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/codegangsta/cli"
@@ -20,6 +23,19 @@ import (
 	"strings"
 	"time"
 )
+
+var baseDir string
+var homeDir string
+
+func init() {
+	currentUser, err := user.Current()
+	if err != nil {
+		panic(err)
+	}
+
+	homeDir = currentUser.HomeDir
+	baseDir = fmt.Sprintf("%s/.ae", currentUser.HomeDir)
+}
 
 var bashrcCall = []byte(`
 if [ -f ~/.ae/ae-completion.bash ]; then
@@ -63,6 +79,90 @@ type Instance struct {
 	CertName      string
 }
 
+// TODO what happens if this is defined?
+type Profile struct {
+	Name         string `json:"-"`
+	Region       string `json:"region,omitempty"`
+	User         string `json:"user,omitempty"`
+	CertLocation string `json:"certLocation,omitempty"`
+	MaxCacheAge  int    `json:"maxCacheAge,omitempty"`
+	AliasPrefix  string `json:"aliasPrefix,omitempty"`
+}
+
+func loadProfileFromFile(location string) (error, Profile) {
+	if _, err := os.Stat(location); os.IsNotExist(err) {
+		return nil, Profile{}
+	}
+
+	profileBytes, err := ioutil.ReadFile(location)
+	if err != nil {
+		return err, Profile{}
+	}
+
+	var profile Profile
+	err = json.Unmarshal(profileBytes, &profile)
+	if err != nil {
+		return err, Profile{}
+	}
+
+	return nil, profile
+}
+
+func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
+	location := fmt.Sprintf("%s/config/%s.json", baseDir, context.GlobalString("profile"))
+	err, profile := loadProfileFromFile(location)
+	if err != nil {
+		return err, profile
+	}
+
+	profile.Name = context.GlobalString("profile")
+
+	if useEnvValues == false {
+		return nil, profile
+	}
+
+	if profile.Region == "" {
+		profile.Region = context.GlobalString("region")
+	}
+	if profile.User == "" {
+		profile.User = context.GlobalString("user")
+	}
+	if profile.CertLocation == "" {
+		profile.CertLocation = context.GlobalString("cert")
+	}
+	if profile.MaxCacheAge == 0 {
+		maxCacheAge, err := strconv.Atoi(context.GlobalString("maxCacheAge"))
+		if err != nil {
+			return errors.New("maxCacheAge must be a integer"), Profile{}
+		}
+
+		profile.MaxCacheAge = maxCacheAge
+	}
+	if profile.AliasPrefix == "" {
+		profile.AliasPrefix = context.String("prefix")
+	}
+
+	return nil, profile
+}
+
+func (profile *Profile) save() error {
+	if profile.Name == "" {
+		return errors.New("Profile name is not set")
+	}
+
+	if err := os.MkdirAll(fmt.Sprintf("%s/config", baseDir), 0770); err != nil {
+		return err
+	}
+
+	configLoc := fmt.Sprintf("%s/config/%s.json", baseDir, profile.Name)
+	configBytes, err := json.MarshalIndent(profile, "", "    ")
+	if err != nil {
+		return err
+	}
+
+	return ioutil.WriteFile(configLoc, configBytes, 0775)
+}
+
 func (i *Instance) getNormalisedName() string {
 	return fmt.Sprintf("%s_%s", regexWhiteChars.ReplaceAllString(i.Name, "_"), i.Id)
 }
@@ -72,8 +172,8 @@ func exit(msg string) {
 	os.Exit(1)
 }
 
-func getInstanceCache(region string, aeDir string, maxAge int) map[string]*Instance {
-	cacheLocation := fmt.Sprintf("%s/cache/%s.cache", aeDir, region)
+func getInstanceCache(region string, profile string, maxAge int) map[string]*Instance {
+	cacheLocation := fmt.Sprintf("%s/cache/%s_%s.cache", baseDir, profile, region)
 	if info, err := os.Stat(cacheLocation); err != nil {
 		return nil
 	} else if maxAge == 0 {
@@ -102,12 +202,12 @@ func getInstanceCache(region string, aeDir string, maxAge int) map[string]*Insta
 	return cache
 }
 
-func storeInstanceCache(region string, aeDir string, cache map[string]*Instance) error {
-	if err := os.MkdirAll(fmt.Sprintf("%s/cache", aeDir), 0770); err != nil {
+func storeInstanceCache(region string, profile string, cache map[string]*Instance) error {
+	if err := os.MkdirAll(fmt.Sprintf("%s/cache", baseDir), 0770); err != nil {
 		return err
 	}
 
-	cacheLocation := fmt.Sprintf("%s/cache/%s.cache", aeDir, region)
+	cacheLocation := fmt.Sprintf("%s/cache/%s_%s.cache", baseDir, profile, region)
 
 	buffer := bytes.Buffer{}
 	encoder := gob.NewEncoder(&buffer)
@@ -125,19 +225,19 @@ func storeInstanceCache(region string, aeDir string, cache map[string]*Instance)
 	return nil
 }
 
-func getInstances(region string, maxCacheAge int) (error, map[string]*Instance) {
-	user, err := user.Current()
-	if err != nil {
-		panic(err)
-	}
-
-	aeDir := fmt.Sprintf("%s/.ae", user.HomeDir)
-	instances := getInstanceCache(region, aeDir, maxCacheAge)
+func getInstances(region string, maxCacheAge int, profile string) (error, map[string]*Instance) {
+	instances := getInstanceCache(region, profile, maxCacheAge)
 	if instances != nil {
 		return nil, instances
 	}
 
-	config := aws.Config{}
+	config := aws.Config{
+		Credentials: credentials.NewSharedCredentials(
+			fmt.Sprintf("%s/.aws/credentials", homeDir),
+			profile,
+		),
+	}
+
 	if region != "" {
 		config.Region = aws.String(region)
 	}
@@ -178,7 +278,7 @@ func getInstances(region string, maxCacheAge int) (error, map[string]*Instance) 
 		}
 	}
 
-	if err = storeInstanceCache(region, aeDir, instances); err != nil {
+	if err = storeInstanceCache(region, profile, instances); err != nil {
 		return err, nil
 	}
 
@@ -217,9 +317,130 @@ func main() {
 			Name:  "flushCache",
 			Usage: "Flush the cache",
 		},
+		cli.StringFlag{
+			Name:   "profile",
+			Value:  "default",
+			Usage:  "Profile to use",
+			EnvVar: "AE_DEFAULT_PROFILE",
+		},
 	}
 
 	app.Commands = []cli.Command{
+		{
+			Name:  "set",
+			Usage: "Set a property of a profile",
+			Subcommands: []cli.Command{
+				{
+					Name:  "envvars",
+					Usage: "Special command to save the environment variables into the configuration file",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, true)
+						if err != nil {
+							panic(err)
+						}
+
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
+				{
+					Name:  "region",
+					Usage: "Set AWS region to connect to",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, false)
+						if err != nil {
+							panic(err)
+						}
+
+						if len(context.Args()) != 1 {
+							exit("Invalid amount of arguments. Expected region.")
+						}
+
+						profile.Region = context.Args().First()
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
+				{
+					Name:  "user",
+					Usage: "Set the SSH username to connect to the machine with",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, false)
+						if err != nil {
+							panic(err)
+						}
+
+						if len(context.Args()) != 1 {
+							exit("Invalid amount of arguments. Expected user.")
+						}
+
+						profile.User = context.Args().First()
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
+				{
+					Name:  "cert",
+					Usage: "Location of the certificate to use when connecting to a machine",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, false)
+						if err != nil {
+							panic(err)
+						}
+
+						if len(context.Args()) != 1 {
+							exit("Invalid amount of arguments. Expected certicate location.")
+						}
+
+						profile.CertLocation = context.Args().First()
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
+				{
+					Name:  "maxCacheAge",
+					Usage: "Maximum age in seconds to cache a AWS API call",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, false)
+						if err != nil {
+							panic(err)
+						}
+
+						if len(context.Args()) != 1 {
+							exit("Invalid amount of arguments. Expected maximum cache age.")
+						}
+
+						profile.CertLocation = context.Args().First()
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
+				{
+					Name:  "prefix",
+					Usage: "Prefix to append to the alias name when generating aliases",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, false)
+						if err != nil {
+							panic(err)
+						}
+
+						if len(context.Args()) != 1 {
+							exit("Invalid amount of arguments. Expected SSH alias prefix.")
+						}
+
+						profile.AliasPrefix = context.Args().First()
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
+			},
+		},
 		{
 			Name:   "setup-auto-complete",
 			Usage:  "Setup auto complete (requires sudo)",
@@ -252,16 +473,17 @@ func main() {
 					return
 				}
 
-				maxCacheAge, err := strconv.Atoi(c.GlobalString("maxCacheAge"))
+				err, profile := loadProfile(c, true)
 				if err != nil {
-					exit("maxCacheAge must be a integer")
+					panic(err)
 				}
 
+				maxCacheAge := profile.MaxCacheAge
 				if c.GlobalBool("flushCache") == true {
 					maxCacheAge = 0
 				}
 
-				err, instances := getInstances(c.GlobalString("region"), maxCacheAge)
+				err, instances := getInstances(profile.Region, maxCacheAge, profile.Name)
 				if err != nil {
 					panic(err)
 				}
@@ -324,39 +546,33 @@ func cp(src, dst string) error {
 }
 
 func actionSetup(c *cli.Context) {
-	user, err := user.Current()
-	if err != nil {
-		panic(err)
-	}
+	aeCompletionLoc := fmt.Sprintf("%s/ae-completion.bash", baseDir)
+	aeExecLoc := fmt.Sprintf("%s/ae", baseDir)
+	bashrcLoc := fmt.Sprintf("%s/.bashrc", homeDir)
+	zshrcLoc := fmt.Sprintf("%s/.zshrc", homeDir)
 
-	aeDirectory := fmt.Sprintf("%s/.ae", user.HomeDir)
-	aeCompletionLoc := fmt.Sprintf("%s/ae-completion.bash", aeDirectory)
-	aeExecLoc := fmt.Sprintf("%s/ae", aeDirectory)
-	bashrcLoc := fmt.Sprintf("%s/.bashrc", user.HomeDir)
-	zshrcLoc := fmt.Sprintf("%s/.zshrc", user.HomeDir)
-
-	if err = os.Mkdir(aeDirectory, 0775); os.IsExist(err) {
-		exit("ae is already installed, remove ~/.ae and try again")
+	if err := os.Mkdir(baseDir, 0775); os.IsExist(err) {
+		exit(fmt.Sprintf("ae is already installed, remove %s and try again", baseDir))
 	} else if err != nil {
 		panic(err)
 	} else {
-		fmt.Println(fmt.Sprintf("created %s", aeDirectory))
+		fmt.Println(fmt.Sprintf("created %s", baseDir))
 	}
 
 	currExecLoc, _ := osext.Executable()
-	if err = cp(currExecLoc, aeExecLoc); err != nil {
+	if err := cp(currExecLoc, aeExecLoc); err != nil {
 		panic(err)
 	}
 
-	if err = os.Chmod(aeExecLoc, 0775); err != nil {
+	if err := os.Chmod(aeExecLoc, 0775); err != nil {
 		panic(err)
 	}
 
-	if err = ioutil.WriteFile(aeCompletionLoc, bashAutoComplete, 0775); err != nil {
+	if err := ioutil.WriteFile(aeCompletionLoc, bashAutoComplete, 0775); err != nil {
 		panic(err)
 	}
 
-	if err = writeConfig(bashrcLoc, bashrcCall); err != nil {
+	if err := writeConfig(bashrcLoc, bashrcCall); err != nil {
 		panic(err)
 	}
 
@@ -372,16 +588,17 @@ func actionSSH(c *cli.Context) {
 		exit("ssh <instance-name>")
 	}
 
-	maxCacheAge, err := strconv.Atoi(c.GlobalString("maxCacheAge"))
+	err, profile := loadProfile(c, true)
 	if err != nil {
-		exit("maxCacheAge must be a integer")
+		panic(err)
 	}
 
+	maxCacheAge := profile.MaxCacheAge
 	if c.GlobalBool("flushCache") == true {
 		maxCacheAge = 0
 	}
 
-	err, instances := getInstances(c.GlobalString("region"), maxCacheAge)
+	err, instances := getInstances(profile.Region, maxCacheAge, profile.Name)
 
 	var host string
 	if instance, ok := instances[c.Args().First()]; ok {
@@ -391,8 +608,8 @@ func actionSSH(c *cli.Context) {
 	}
 
 	cmd := exec.Command(
-		"ssh", "-i", c.GlobalString("cert"),
-		fmt.Sprintf("%s@%s", c.GlobalString("user"), host),
+		"ssh", "-i", profile.CertLocation,
+		fmt.Sprintf("%s@%s", profile.User, host),
 	)
 
 	cmd.Stdin = os.Stdin
@@ -411,19 +628,20 @@ func actionSSH(c *cli.Context) {
 }
 
 func actionStatus(c *cli.Context) {
+	err, profile := loadProfile(c, true)
+	if err != nil {
+		panic(err)
+	}
+
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Id", "Name", "Cert", "Type", "URL"})
 
-	maxCacheAge, err := strconv.Atoi(c.GlobalString("maxCacheAge"))
-	if err != nil {
-		exit("maxCacheAge must be a integer")
-	}
-
+	maxCacheAge := profile.MaxCacheAge
 	if c.GlobalBool("flushCache") == true {
 		maxCacheAge = 0
 	}
 
-	err, instances := getInstances(c.GlobalString("region"), maxCacheAge)
+	err, instances := getInstances(profile.Region, maxCacheAge, profile.Name)
 	if err != nil {
 		panic(err)
 	}
@@ -440,27 +658,26 @@ func actionStatus(c *cli.Context) {
 }
 
 func actionAlias(c *cli.Context) {
-	user := c.GlobalString("user")
+	err, profile := loadProfile(c, true)
+	if err != nil {
+		panic(err)
+	}
 
 	sshCertificateLocation := ""
-	if c.GlobalString("cert") != "" {
-		if _, err := os.Stat(c.GlobalString("cert")); err != nil {
+	if profile.CertLocation != "" {
+		if _, err := os.Stat(profile.CertLocation); err != nil {
 			exit("Cannot find certificate")
 		}
 
-		sshCertificateLocation = fmt.Sprintf(" -i %s", c.GlobalString("cert"))
+		sshCertificateLocation = fmt.Sprintf(" -i %s", profile.CertLocation)
 	}
 
-	maxCacheAge, err := strconv.Atoi(c.GlobalString("maxCacheAge"))
-	if err != nil {
-		exit("maxCacheAge must be a integer")
-	}
-
+	maxCacheAge := profile.MaxCacheAge
 	if c.GlobalBool("flushCache") == true {
 		maxCacheAge = 0
 	}
 
-	err, instances := getInstances(c.GlobalString("region"), maxCacheAge)
+	err, instances := getInstances(profile.Region, maxCacheAge, profile.Name)
 	if err != nil {
 		panic(err)
 	}
@@ -470,8 +687,8 @@ func actionAlias(c *cli.Context) {
 		name = regexWhiteChars.ReplaceAllString(name, "_")
 
 		fmt.Println(fmt.Sprintf(
-			"alias %s%s=\"ssh%s %s@%s\"", c.String("prefix"), strings.ToLower(name),
-			sshCertificateLocation, user, instance.Addr,
+			"alias %s%s=\"ssh%s %s@%s\"", profile.AliasPrefix, strings.ToLower(name),
+			sshCertificateLocation, profile.User, instance.Addr,
 		))
 	}
 }
