@@ -79,7 +79,6 @@ type Instance struct {
 	CertName      string
 }
 
-// TODO what happens if this is defined?
 type Profile struct {
 	Name         string `json:"-"`
 	Region       string `json:"region,omitempty"`
