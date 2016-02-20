@@ -286,6 +286,7 @@ func getInstances(region string, maxCacheAge int, profile string) (error, map[st
 
 func main() {
 	app := cli.NewApp()
+	app.Version = "0.0.1"
 	app.EnableBashCompletion = true
 
 	app.Flags = []cli.Flag{
