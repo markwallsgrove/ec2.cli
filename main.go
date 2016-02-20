@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/gob"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,19 +12,25 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/codegangsta/cli"
+	"github.com/inconshreveable/go-update"
 	"github.com/kardianos/osext"
 	"github.com/olekukonko/tablewriter"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
+	"path"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
+var releasesAPI string = "https://api.github.com/repos/markwallsgrove/ssh_alias_ec2/releases"
+var version string = "0.0.1"
 var baseDir string
 var homeDir string
 
@@ -68,7 +75,89 @@ if [ -f ~/.ae/.ae-completion.bash ]; then
 fi
 `)
 
+var publicKey = []byte(`
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEvbKUOY+q3YFsJXCbPeT5VsVj69+K
+lc/qbJVx/ZsbbPOTiMoWdQ7vENoMcqPgB7O6ouHoLo1FlOazHEnQVcFXoA==
+-----END PUBLIC KEY-----
+`)
+
 var regexWhiteChars = regexp.MustCompile("[^a-zA-Z0-9]")
+
+var forwardAssetFilePattern = regexp.MustCompile(fmt.Sprintf(
+	"/f-%s-%s\\.(hash|sig|diff)$", runtime.GOOS, runtime.GOARCH,
+))
+
+var backwardsAssetFilePattern = regexp.MustCompile(fmt.Sprintf(
+	"/b-%s-%s\\.(hash|sig|diff)$", runtime.GOOS, runtime.GOARCH,
+))
+
+func downloadFile(uri string, loc string, errChannel chan error) {
+	output, err := os.Create(loc)
+	if err != nil {
+		errChannel <- err
+	}
+
+	defer output.Close()
+
+	response, err := http.Get(uri)
+	if err != nil {
+		errChannel <- err
+	}
+
+	defer response.Body.Close()
+
+	_, err = io.Copy(output, response.Body)
+	if err != nil {
+		errChannel <- err
+	}
+
+	errChannel <- errors.New("")
+}
+
+type Release struct {
+	Version string  `json:"tag_name"`
+	Body    string  `json:"body"`
+	Assets  []Asset `json:"assets"`
+}
+
+func (release *Release) DownloadAssets(pattern regexp.Regexp, location string) error {
+	if len(release.Assets) == 0 {
+		return errors.New("Release contains zero assets")
+	}
+
+	downloading := 0
+	errChannel := make(chan error)
+	for _, asset := range release.Assets {
+		if pattern.MatchString(asset.DownloadUrl) == false {
+			continue
+		}
+
+		fmt.Println("Downloading", asset.DownloadUrl, "to", path.Join(location, asset.Name))
+		go downloadFile(asset.DownloadUrl, path.Join(location, asset.Name), errChannel)
+		downloading += 1
+	}
+
+	var err error
+	for i := 0; i < downloading; i++ {
+		err = <-errChannel
+		if err.Error() != "" {
+			break
+		}
+	}
+
+	close(errChannel)
+	if err.Error() != "" {
+		return err
+	}
+
+	return nil
+}
+
+type Asset struct {
+	Name        string `json:"name"`
+	DownloadUrl string `json:"browser_download_url"`
+}
 
 type Instance struct {
 	Name          string
@@ -288,6 +377,7 @@ func main() {
 	app := cli.NewApp()
 	app.Version = "0.0.1"
 	app.EnableBashCompletion = true
+	app.Version = version
 
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
@@ -438,6 +528,17 @@ func main() {
 							panic(err)
 						}
 					},
+				},
+			},
+		},
+		{
+			Name:   "update",
+			Usage:  "Update to a later version",
+			Action: actionUpdate,
+			Flags: []cli.Flag{
+				cli.BoolFlag{
+					Name:  "downgrade",
+					Usage: "Downgrade to a earlier version",
 				},
 			},
 		},
@@ -691,4 +792,147 @@ func actionAlias(c *cli.Context) {
 			sshCertificateLocation, profile.User, instance.Addr,
 		))
 	}
+}
+
+func getReleases() ([]Release, error) {
+	res, err := http.Get(releasesAPI)
+	if err != nil {
+		return []Release{}, err
+	}
+
+	defer res.Body.Close()
+
+	var releases []Release
+	decoder := json.NewDecoder(res.Body)
+	err = decoder.Decode(&releases)
+	if err != nil {
+		return []Release{}, err
+	}
+
+	return releases, nil
+}
+
+func getNextRelease(releases []Release, version string, downgrade bool) (Release, bool, bool) {
+	for index, release := range releases {
+		if release.Version == version {
+			earliestRelease := index+1 == len(releases)
+			if index == 0 {
+				return releases[0], true, earliestRelease
+			} else if downgrade {
+				return releases[index], false, earliestRelease
+			} else {
+				return releases[index-1], false, earliestRelease
+			}
+		}
+	}
+
+	return Release{}, false, false
+}
+
+func actionUpdate(c *cli.Context) {
+	releases, err := getReleases()
+	if err != nil {
+		panic(err)
+	}
+
+	if len(releases) < 2 {
+		exit("Zero new releases are available")
+	}
+
+	downgrade := c.Bool("downgrade")
+
+	release, latest, earliest := getNextRelease(releases, version, downgrade)
+	if release.Version == "" {
+		// TODO: could this happen after many updates? Does Github use pagination?
+		exit("ERROR: cannot find version information. Please re-download")
+	} else if latest == true && downgrade == false {
+		exit("Latest version already installed")
+	} else if downgrade == true && earliest == true {
+		exit("ae is already at the earliest available release")
+	}
+
+	if downgrade {
+		err = release.DownloadAssets(*backwardsAssetFilePattern, "/tmp")
+	} else {
+		err = release.DownloadAssets(*forwardAssetFilePattern, "/tmp")
+	}
+
+	if err != nil {
+		panic(err)
+	}
+
+	err = applyPatch("/tmp", downgrade)
+	if err != nil {
+		panic(err)
+	}
+
+	if downgrade == true {
+		fmt.Println("successfully downgraded from", release.Version)
+	} else {
+		fmt.Println("successfully updated from", release.Version)
+	}
+}
+
+func applyPatch(filesLoc string, downgrade bool) error {
+	fmt.Println("patching...")
+
+	var direction string
+	if downgrade == true {
+		direction = "b"
+	} else {
+		direction = "f"
+	}
+
+	hashLoc := path.Join(filesLoc, fmt.Sprintf("%s-%s-%s.hash", direction, runtime.GOOS, runtime.GOARCH))
+	sigLoc := path.Join(filesLoc, fmt.Sprintf("%s-%s-%s.sig", direction, runtime.GOOS, runtime.GOARCH))
+	diffLoc := path.Join(filesLoc, fmt.Sprintf("%s-%s-%s.diff", direction, runtime.GOOS, runtime.GOARCH))
+
+	_, hashLocErr := os.Stat(hashLoc)
+	_, sigLocErr := os.Stat(sigLoc)
+	_, diffErr := os.Stat(diffLoc)
+
+	if hashLocErr != nil || sigLocErr != nil || diffErr != nil {
+		return errors.New("No all required files are available for download")
+	}
+
+	file, err := os.Open(diffLoc)
+	if err != nil {
+		panic(err)
+	}
+
+	// Signature of the new executable, signed by the private cert
+	signature, err := ioutil.ReadFile(sigLoc)
+	if err != nil {
+		panic(err)
+	}
+
+	// SHA-256 hash of the patch file
+	hash, err := ioutil.ReadFile(hashLoc)
+	if err != nil {
+		panic(err)
+	}
+
+	// Remove newline from the file
+	checksum, err := hex.DecodeString(strings.TrimSpace(string(hash)))
+	if err != nil {
+		panic(err)
+	}
+
+	opts := update.Options{
+		Patcher:   update.NewBSDiffPatcher(),
+		Checksum:  checksum,
+		Signature: signature,
+	}
+
+	err = opts.SetPublicKeyPEM(publicKey)
+	if err != nil {
+		panic(err)
+	}
+
+	err = update.Apply(file, opts)
+	if err != nil {
+		panic(err)
+	}
+
+	return nil
 }
