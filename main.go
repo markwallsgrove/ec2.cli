@@ -407,7 +407,9 @@ func getInstances(region string, maxCacheAge int, profile Profile) (error, map[s
 
 func main() {
 	app := cli.NewApp()
-	app.Version = "0.0.1"
+	app.Name = "ec2.cli"
+	app.Usage = "quickly gain access to EC2 machines"
+	app.Version = "0.5.0"
 	app.EnableBashCompletion = true
 	app.Version = version
 
@@ -654,8 +656,8 @@ func main() {
 			},
 		},
 		{
-			Name:   "setup-auto-complete",
-			Usage:  "Setup auto complete (requires sudo)",
+			Name:   "setup",
+			Usage:  "Setup auto complete",
 			Action: actionSetup,
 		},
 		{
