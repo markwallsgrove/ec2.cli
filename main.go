@@ -96,6 +96,7 @@ func downloadFile(uri string, loc string, errChannel chan error) {
 	output, err := os.Create(loc)
 	if err != nil {
 		errChannel <- err
+		return
 	}
 
 	defer output.Close()
@@ -103,6 +104,7 @@ func downloadFile(uri string, loc string, errChannel chan error) {
 	response, err := http.Get(uri)
 	if err != nil {
 		errChannel <- err
+		return
 	}
 
 	defer response.Body.Close()
@@ -110,6 +112,7 @@ func downloadFile(uri string, loc string, errChannel chan error) {
 	_, err = io.Copy(output, response.Body)
 	if err != nil {
 		errChannel <- err
+		return
 	}
 
 	errChannel <- errors.New("")
@@ -175,6 +178,9 @@ type Profile struct {
 	CertLocation string `json:"certLocation,omitempty"`
 	MaxCacheAge  int    `json:"maxCacheAge,omitempty"`
 	AliasPrefix  string `json:"aliasPrefix,omitempty"`
+	AWSProfile   string `json:"awsProfile,omitempty"`
+	AWSAccessKey string `json:"awsAccessKey,omitempty"`
+	AWSSecretKey string `json:"awsSecretKey,omitempty"`
 }
 
 func loadProfileFromFile(location string) (error, Profile) {
@@ -209,25 +215,42 @@ func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
 		return nil, profile
 	}
 
-	if profile.Region == "" {
+	if context.GlobalString("region") != "" {
 		profile.Region = context.GlobalString("region")
+	} else if profile.Region == "" {
+		profile.Region = "eu-west-1"
 	}
-	if profile.User == "" {
+
+	if context.GlobalString("user") != "" {
 		profile.User = context.GlobalString("user")
 	}
-	if profile.CertLocation == "" {
-		profile.CertLocation = context.GlobalString("cert")
-	}
-	if profile.MaxCacheAge == 0 {
-		maxCacheAge, err := strconv.Atoi(context.GlobalString("maxCacheAge"))
-		if err != nil {
-			return errors.New("maxCacheAge must be a integer"), Profile{}
-		}
 
-		profile.MaxCacheAge = maxCacheAge
+	if context.GlobalString("cert") != "" {
+		profile.CertLocation = context.GlobalString("cert")
+	} else if profile.CertLocation == "" {
+		profile.CertLocation = "~/.ssh/id_rsa"
 	}
-	if profile.AliasPrefix == "" {
+
+	if context.GlobalInt("maxCacheAge") != -1 {
+		profile.MaxCacheAge = context.GlobalInt("maxCacheAge")
+	} else if profile.MaxCacheAge == 0 {
+		profile.MaxCacheAge = 300
+	}
+
+	if context.String("prefix") != "" {
 		profile.AliasPrefix = context.String("prefix")
+	}
+
+	if context.GlobalString("awsProfile") != "" {
+		profile.AWSProfile = context.GlobalString("awsProfile")
+	}
+
+	if context.GlobalString("awsAccessKey") != "" {
+		profile.AWSAccessKey = context.GlobalString("awsAccessKey")
+	}
+
+	if context.GlobalString("awsSecretKey") != "" {
+		profile.AWSSecretKey = context.GlobalString("awsSecretKey")
 	}
 
 	return nil, profile
@@ -313,18 +336,29 @@ func storeInstanceCache(region string, profile string, cache map[string]*Instanc
 	return nil
 }
 
-func getInstances(region string, maxCacheAge int, profile string) (error, map[string]*Instance) {
-	instances := getInstanceCache(region, profile, maxCacheAge)
+func getInstances(region string, maxCacheAge int, profile Profile) (error, map[string]*Instance) {
+	instances := getInstanceCache(region, profile.Name, maxCacheAge)
 	if instances != nil {
 		return nil, instances
 	}
 
-	config := aws.Config{
-		Credentials: credentials.NewSharedCredentials(
+	var creds *credentials.Credentials
+	if profile.AWSAccessKey != "" && profile.AWSSecretKey != "" {
+		creds = credentials.NewStaticCredentials(
+			profile.AWSAccessKey,
+			profile.AWSSecretKey,
+			"",
+		)
+	} else if profile.AWSProfile != "" {
+		creds = credentials.NewSharedCredentials(
 			fmt.Sprintf("%s/.aws/credentials", homeDir),
-			profile,
-		),
+			profile.AWSProfile,
+		)
+	} else {
+		creds = credentials.NewEnvCredentials()
 	}
+
+	config := aws.Config{Credentials: creds}
 
 	if region != "" {
 		config.Region = aws.String(region)
@@ -366,7 +400,7 @@ func getInstances(region string, maxCacheAge int, profile string) (error, map[st
 		}
 	}
 
-	if err = storeInstanceCache(region, profile, instances); err != nil {
+	if err = storeInstanceCache(region, profile.Name, instances); err != nil {
 		return err, nil
 	}
 
@@ -382,7 +416,6 @@ func main() {
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
 			Name:   "region",
-			Value:  "eu-west-1",
 			EnvVar: "AE_AWS_DEFAULT_REGION",
 			Usage:  "AWS region",
 		},
@@ -393,13 +426,12 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:   "cert",
-			Value:  "~/.ssh/id_rsa",
 			Usage:  "Certificate used when ssh'ing",
 			EnvVar: "AE_SSH_CERTIFICATE",
 		},
-		cli.StringFlag{
+		cli.IntFlag{
 			Name:   "maxCacheAge",
-			Value:  "300",
+			Value:  -1,
 			Usage:  "Maximum cache age in seconds",
 			EnvVar: "AE_MAX_CACHE_AGE",
 		},
@@ -413,6 +445,18 @@ func main() {
 			Usage:  "Profile to use",
 			EnvVar: "AE_DEFAULT_PROFILE",
 		},
+		cli.StringFlag{
+			Name:  "awsProfile",
+			Usage: "Override the AWS profile to use",
+		},
+		cli.StringFlag{
+			Name:  "awsAccessKey",
+			Usage: "Override the AWS Access Key to use",
+		},
+		cli.StringFlag{
+			Name:  "awsSecretKey",
+			Usage: "Override the AWS Secret Key to use",
+		},
 	}
 
 	app.Commands = []cli.Command{
@@ -420,6 +464,63 @@ func main() {
 			Name:  "set",
 			Usage: "Set a property of a profile",
 			Subcommands: []cli.Command{
+				{
+					Name:  "awsSecretKey",
+					Usage: "Set the AWS Secret Key to use within this profile",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, false)
+						if err != nil {
+							panic(err)
+						}
+
+						if len(context.Args()) != 1 {
+							exit("Invalid amount of arguments. Expected awsProfile.")
+						}
+
+						profile.AWSSecretKey = context.Args().First()
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
+				{
+					Name:  "awsAccessKey",
+					Usage: "Set the AWS Access Key to use within this profile",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, false)
+						if err != nil {
+							panic(err)
+						}
+
+						if len(context.Args()) != 1 {
+							exit("Invalid amount of arguments. Expected awsProfile.")
+						}
+
+						profile.AWSAccessKey = context.Args().First()
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
+				{
+					Name:  "awsProfile",
+					Usage: "AWS profile to use",
+					Action: func(context *cli.Context) {
+						err, profile := loadProfile(context, false)
+						if err != nil {
+							panic(err)
+						}
+
+						if len(context.Args()) != 1 {
+							exit("Invalid amount of arguments. Expected awsProfile.")
+						}
+
+						profile.AWSProfile = context.Args().First()
+						if err = profile.save(); err != nil {
+							panic(err)
+						}
+					},
+				},
 				{
 					Name:  "envvars",
 					Usage: "Special command to save the environment variables into the configuration file",
@@ -485,6 +586,10 @@ func main() {
 							exit("Invalid amount of arguments. Expected certicate location.")
 						}
 
+						if _, err := os.Stat(context.Args().First()); os.IsNotExist(err) {
+							exit("Cannot find file")
+						}
+
 						profile.CertLocation = context.Args().First()
 						if err = profile.save(); err != nil {
 							panic(err)
@@ -504,7 +609,12 @@ func main() {
 							exit("Invalid amount of arguments. Expected maximum cache age.")
 						}
 
-						profile.CertLocation = context.Args().First()
+						maxCacheAge, err := strconv.Atoi(context.Args().First())
+						if err != nil {
+							exit("First argument must be a integer")
+						}
+
+						profile.MaxCacheAge = maxCacheAge
 						if err = profile.save(); err != nil {
 							panic(err)
 						}
@@ -584,7 +694,7 @@ func main() {
 					maxCacheAge = 0
 				}
 
-				err, instances := getInstances(profile.Region, maxCacheAge, profile.Name)
+				err, instances := getInstances(profile.Region, maxCacheAge, profile)
 				if err != nil {
 					panic(err)
 				}
@@ -699,7 +809,7 @@ func actionSSH(c *cli.Context) {
 		maxCacheAge = 0
 	}
 
-	err, instances := getInstances(profile.Region, maxCacheAge, profile.Name)
+	err, instances := getInstances(profile.Region, maxCacheAge, profile)
 
 	var host string
 	if instance, ok := instances[c.Args().First()]; ok {
@@ -742,7 +852,7 @@ func actionStatus(c *cli.Context) {
 		maxCacheAge = 0
 	}
 
-	err, instances := getInstances(profile.Region, maxCacheAge, profile.Name)
+	err, instances := getInstances(profile.Region, maxCacheAge, profile)
 	if err != nil {
 		panic(err)
 	}
@@ -778,7 +888,7 @@ func actionAlias(c *cli.Context) {
 		maxCacheAge = 0
 	}
 
-	err, instances := getInstances(profile.Region, maxCacheAge, profile.Name)
+	err, instances := getInstances(profile.Region, maxCacheAge, profile)
 	if err != nil {
 		panic(err)
 	}
