@@ -41,13 +41,13 @@ func init() {
 	}
 
 	homeDir = currentUser.HomeDir
-	baseDir = fmt.Sprintf("%s/.ae", currentUser.HomeDir)
+	baseDir = fmt.Sprintf("%s/.ec2.cli", currentUser.HomeDir)
 }
 
 var bashrcCall = []byte(`
-if [ -f ~/.ae/ae-completion.bash ]; then
-	export PATH="$PATH:$HOME/.ae"
-    . ~/.ae/ae-completion.bash
+if [ -f ~/.ec2.cli/completion.bash ]; then
+	export PATH="$PATH:$HOME/.ec2.cli"
+    . ~/.ec2.cli/completion.bash
 fi
 `)
 
@@ -61,17 +61,17 @@ _cli_bash_autocomplete() {
      return 0
 }
 
-complete -F _cli_bash_autocomplete ae
+complete -F _cli_bash_autocomplete ec2.cli
 `)
 
 var zshAutoComplete = []byte(`
 autoload -U compinit && compinit
 autoload -U bashcompinit && bashcompinit
 
-export PATH="$PATH:$HOME/.ae"
+export PATH="$PATH:$HOME/.ec2.cli"
 script_dir=$(dirname $0)
-if [ -f ~/.ae/.ae-completion.bash ]; then
-	source ~/.ae/ae-completion.bash
+if [ -f ~/.ec2.cli/completion.bash ]; then
+	source ~/.ec2.cli/completion.bash
 fi
 `)
 
@@ -647,13 +647,13 @@ func cp(src, dst string) error {
 }
 
 func actionSetup(c *cli.Context) {
-	aeCompletionLoc := fmt.Sprintf("%s/ae-completion.bash", baseDir)
-	aeExecLoc := fmt.Sprintf("%s/ae", baseDir)
+	aeCompletionLoc := fmt.Sprintf("%s/completion.bash", baseDir)
+	aeExecLoc := fmt.Sprintf("%s/ec2.cli", baseDir)
 	bashrcLoc := fmt.Sprintf("%s/.bashrc", homeDir)
 	zshrcLoc := fmt.Sprintf("%s/.zshrc", homeDir)
 
 	if err := os.Mkdir(baseDir, 0775); os.IsExist(err) {
-		exit(fmt.Sprintf("ae is already installed, remove %s and try again", baseDir))
+		exit(fmt.Sprintf("ec2.cli is already installed, remove %s and try again", baseDir))
 	} else if err != nil {
 		panic(err)
 	} else {
@@ -848,7 +848,7 @@ func actionUpdate(c *cli.Context) {
 	} else if latest == true && downgrade == false {
 		exit("Latest version already installed")
 	} else if downgrade == true && earliest == true {
-		exit("ae is already at the earliest available release")
+		exit("ec2.cli is already at the earliest available release")
 	}
 
 	if downgrade {
