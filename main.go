@@ -227,8 +227,6 @@ func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
 
 	if context.GlobalString("cert") != "" {
 		profile.CertLocation = context.GlobalString("cert")
-	} else if profile.CertLocation == "" {
-		profile.CertLocation = "~/.ssh/id_rsa"
 	}
 
 	if context.GlobalInt("maxCacheAge") != -1 {
@@ -426,7 +424,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:   "cert",
-			Usage:  "Certificate used when ssh'ing",
+			Usage:  "Certificate that will be used with ssh",
 			EnvVar: "AE_SSH_CERTIFICATE",
 		},
 		cli.IntFlag{
@@ -446,16 +444,19 @@ func main() {
 			EnvVar: "AE_DEFAULT_PROFILE",
 		},
 		cli.StringFlag{
-			Name:  "awsProfile",
-			Usage: "Override the AWS profile to use",
+			Name: "awsProfile",
+			Usage: "Use a certain AWS Profile when communicating with AWS. " +
+				"This will be used if awsAccessKey and/or awsSecretKey are not defined",
 		},
 		cli.StringFlag{
-			Name:  "awsAccessKey",
-			Usage: "Override the AWS Access Key to use",
+			Name: "awsAccessKey",
+			Usage: "AWS Access Key to use when communicating with AWS. If awsAccessKey " +
+				"and awsSecretKey are defined, they override awsProfile",
 		},
 		cli.StringFlag{
-			Name:  "awsSecretKey",
-			Usage: "Override the AWS Secret Key to use",
+			Name: "awsSecretKey",
+			Usage: "AWS Secret Key to use when communicating with AWS. If awsAccessKey" +
+				"and awsSecretKey are defined, they ovveride awsProfile",
 		},
 	}
 
