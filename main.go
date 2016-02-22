@@ -763,6 +763,7 @@ func actionSetup(c *cli.Context) {
 	aeCompletionLoc := fmt.Sprintf("%s/completion.bash", baseDir)
 	aeExecLoc := fmt.Sprintf("%s/ec2.cli", baseDir)
 	bashrcLoc := fmt.Sprintf("%s/.bashrc", homeDir)
+	bashProfileLoc := fmt.Sprintf("%s/.bash_profile", homeDir)
 	zshrcLoc := fmt.Sprintf("%s/.zshrc", homeDir)
 
 	if err := os.Mkdir(baseDir, 0775); os.IsExist(err) {
@@ -786,7 +787,11 @@ func actionSetup(c *cli.Context) {
 		panic(err)
 	}
 
-	if err := writeConfig(bashrcLoc, bashrcCall); err != nil {
+	if _, err := os.Stat(bashProfileLoc); err == nil {
+		if err := writeConfig(bashProfileLoc, bashrcCall); err != nil {
+			panic(err)
+		}
+	} else if err := writeConfig(bashrcLoc, bashrcCall); err != nil {
 		panic(err)
 	}
 
