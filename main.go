@@ -202,6 +202,15 @@ func loadProfileFromFile(location string) (error, Profile) {
 	return nil, profile
 }
 
+func trimSurroundingQuotes(str string) string {
+	lastChar := len(str) - 1
+	if str[0] == '\'' && str[lastChar] == '\'' || str[0] == '"' && str[lastChar] == '"' {
+		str = str[1:lastChar]
+	}
+
+	return str
+}
+
 func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
 	location := fmt.Sprintf("%s/config/%s.json", baseDir, context.GlobalString("profile"))
 	err, profile := loadProfileFromFile(location)
@@ -209,46 +218,46 @@ func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
 		return err, profile
 	}
 
-	profile.Name = context.GlobalString("profile")
+	profile.Name = trimSurroundingQuotes(context.GlobalString("profile"))
 
 	if useEnvValues == false {
 		return nil, profile
 	}
 
-	if context.GlobalString("region") != "" {
-		profile.Region = context.GlobalString("region")
+	if region := trimSurroundingQuotes(context.GlobalString("region")); region != "" {
+		profile.Region = region
 	} else if profile.Region == "" {
 		profile.Region = "eu-west-1"
 	}
 
-	if context.GlobalString("user") != "" {
-		profile.User = context.GlobalString("user")
+	if user := trimSurroundingQuotes(context.GlobalString("user")); user != "" {
+		profile.User = user
 	}
 
-	if context.GlobalString("cert") != "" {
-		profile.CertLocation = context.GlobalString("cert")
+	if cert := trimSurroundingQuotes(context.GlobalString("cert")); cert != "" {
+		profile.CertLocation = cert
 	}
 
-	if context.GlobalInt("maxCacheAge") != -1 {
-		profile.MaxCacheAge = context.GlobalInt("maxCacheAge")
+	if maxCacheAge := context.GlobalInt("maxCacheAge"); maxCacheAge != -1 {
+		profile.MaxCacheAge = maxCacheAge
 	} else if profile.MaxCacheAge == 0 {
 		profile.MaxCacheAge = 300
 	}
 
-	if context.String("prefix") != "" {
-		profile.AliasPrefix = context.String("prefix")
+	if prefix := trimSurroundingQuotes(context.String("prefix")); prefix != "" {
+		profile.AliasPrefix = prefix
 	}
 
-	if context.GlobalString("awsProfile") != "" {
-		profile.AWSProfile = context.GlobalString("awsProfile")
+	if awsProfile := trimSurroundingQuotes(context.GlobalString("awsProfile")); awsProfile != "" {
+		profile.AWSProfile = awsProfile
 	}
 
-	if context.GlobalString("awsAccessKey") != "" {
-		profile.AWSAccessKey = context.GlobalString("awsAccessKey")
+	if awsAccessKey := trimSurroundingQuotes(context.GlobalString("awsAccessKey")); awsAccessKey != "" {
+		profile.AWSAccessKey = awsAccessKey
 	}
 
-	if context.GlobalString("awsSecretKey") != "" {
-		profile.AWSSecretKey = context.GlobalString("awsSecretKey")
+	if awsSecretKey := trimSurroundingQuotes(context.GlobalString("awsSecretKey")); awsSecretKey != "" {
+		profile.AWSSecretKey = awsSecretKey
 	}
 
 	return nil, profile
@@ -479,7 +488,7 @@ func main() {
 							exit("Invalid amount of arguments. Expected awsProfile.")
 						}
 
-						profile.AWSSecretKey = context.Args().First()
+						profile.AWSSecretKey = trimSurroundingQuotes(context.Args().First())
 						if err = profile.save(); err != nil {
 							panic(err)
 						}
@@ -498,7 +507,7 @@ func main() {
 							exit("Invalid amount of arguments. Expected awsProfile.")
 						}
 
-						profile.AWSAccessKey = context.Args().First()
+						profile.AWSAccessKey = trimSurroundingQuotes(context.Args().First())
 						if err = profile.save(); err != nil {
 							panic(err)
 						}
@@ -517,7 +526,7 @@ func main() {
 							exit("Invalid amount of arguments. Expected awsProfile.")
 						}
 
-						profile.AWSProfile = context.Args().First()
+						profile.AWSProfile = trimSurroundingQuotes(context.Args().First())
 						if err = profile.save(); err != nil {
 							panic(err)
 						}
@@ -550,7 +559,7 @@ func main() {
 							exit("Invalid amount of arguments. Expected region.")
 						}
 
-						profile.Region = context.Args().First()
+						profile.Region = trimSurroundingQuotes(context.Args().First())
 						if err = profile.save(); err != nil {
 							panic(err)
 						}
@@ -569,7 +578,7 @@ func main() {
 							exit("Invalid amount of arguments. Expected user.")
 						}
 
-						profile.User = context.Args().First()
+						profile.User = trimSurroundingQuotes(context.Args().First())
 						if err = profile.save(); err != nil {
 							panic(err)
 						}
@@ -588,11 +597,12 @@ func main() {
 							exit("Invalid amount of arguments. Expected certicate location.")
 						}
 
-						if _, err := os.Stat(context.Args().First()); os.IsNotExist(err) {
+						profile.CertLocation = trimSurroundingQuotes(context.Args().First())
+
+						if _, err := os.Stat(profile.CertLocation); os.IsNotExist(err) {
 							exit("Cannot find file")
 						}
 
-						profile.CertLocation = context.Args().First()
 						if err = profile.save(); err != nil {
 							panic(err)
 						}
@@ -611,7 +621,7 @@ func main() {
 							exit("Invalid amount of arguments. Expected maximum cache age.")
 						}
 
-						maxCacheAge, err := strconv.Atoi(context.Args().First())
+						maxCacheAge, err := strconv.Atoi(trimSurroundingQuotes(context.Args().First()))
 						if err != nil {
 							exit("First argument must be a integer")
 						}
@@ -635,7 +645,7 @@ func main() {
 							exit("Invalid amount of arguments. Expected SSH alias prefix.")
 						}
 
-						profile.AliasPrefix = context.Args().First()
+						profile.AliasPrefix = trimSurroundingQuotes(context.Args().First())
 						if err = profile.save(); err != nil {
 							panic(err)
 						}
@@ -819,7 +829,7 @@ func actionSSH(c *cli.Context) {
 	err, instances := getInstances(profile.Region, maxCacheAge, profile)
 
 	var host string
-	if instance, ok := instances[c.Args().First()]; ok {
+	if instance, ok := instances[trimSurroundingQuotes(c.Args().First())]; ok {
 		host = instance.Addr
 	} else {
 		exit(fmt.Sprintf("Unknown instance: %s\n%+v", c.Args().First(), instances))
