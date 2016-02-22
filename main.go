@@ -15,6 +15,7 @@ import (
 	"github.com/inconshreveable/go-update"
 	"github.com/kardianos/osext"
 	"github.com/olekukonko/tablewriter"
+	"github.com/toumorokoshi/go-fuzzy/fuzzy"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -169,6 +170,7 @@ type Instance struct {
 	PublicDnsName string
 	InstanceType  string
 	CertName      string
+	Tags          []string
 }
 
 type Profile struct {
@@ -387,11 +389,12 @@ func getInstances(region string, maxCacheAge int, profile Profile) (error, map[s
 		for _, inst := range res.Instances {
 			instance := new(Instance)
 
-			for _, keys := range inst.Tags {
+			instance.Tags = make([]string, len(inst.Tags))
+			for index, keys := range inst.Tags {
+				instance.Tags[index] = *keys.Value
 				if *keys.Key == "Name" {
 					instance.Name = *keys.Value
 					instance.Id = *inst.InstanceId
-					break
 				}
 			}
 
@@ -692,10 +695,15 @@ func main() {
 			Action: actionStatus,
 		},
 		{
-			Name:  "ssh",
-			Usage: "ssh to a given machine",
-
+			Name:   "ssh",
+			Usage:  "ssh to a given machine",
 			Action: actionSSH,
+			Flags: []cli.Flag{
+				cli.StringFlag{
+					Name:  "tag",
+					Usage: "fuzzy find against a machine's tags",
+				},
+			},
 			BashComplete: func(c *cli.Context) {
 				if len(c.Args()) > 0 {
 					return
@@ -716,8 +724,11 @@ func main() {
 					panic(err)
 				}
 
+				fuzzyTag := c.String("tag")
 				for name := range instances {
-					fmt.Println(name)
+					if fuzzyTag == "" || fuzzy.SequenceMatch(fuzzyTag, name) {
+						fmt.Println(name)
+					}
 				}
 			},
 		},
