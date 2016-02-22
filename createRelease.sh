@@ -15,7 +15,7 @@ if [[ ! -f $privateKey || ! -f $newexe || ! -f $oldexe ]]; then
 fi
 
 # TODO: more archiectures
-if [[ ! $newexe =~ ^[a-zA-Z0-9]+\-(darwin|linux)-amd64$ || ! $oldexe =~ ^[a-zA-Z0-9]+\-(darwin|linux)-amd64$ ]]; then
+if [[ ! $newexe =~ ^.+/[a-zA-Z0-9\.]+\-(darwin|linux)-amd64$ || ! $oldexe =~ ^.+/[a-zA-Z0-9\.]+\-(darwin|linux)-amd64$ ]]; then
     echo "invalid executable name(s)"
     exit 1
 fi
