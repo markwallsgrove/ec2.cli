@@ -422,7 +422,7 @@ func main() {
 		cli.StringFlag{
 			Name:   "user",
 			Usage:  "SSH username",
-			EnvVar: "AE_SSH_USER,USER",
+			EnvVar: "AE_SSH_USER",
 		},
 		cli.StringFlag{
 			Name:   "cert",
