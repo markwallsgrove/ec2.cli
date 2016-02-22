@@ -9,9 +9,13 @@
 
 ## configuration
 The following items might need changing depending on your environment.
-* `AWS_ACCESS_KEY_ID` `AWS_SECRET_ACCESS_KEY` environment variables are used by default, or
+
+### mandatory
+* recommended - `ec2.cli set awsAccessKey KEY` & `ec2.cli set awsSecretKey KEY` if you do not use `~/.aws/credentials`
 * If you use `~/.aws/credentials`, execute `ec2.cli set awsProfile PROFILE` to set the name of the profile, or
-* `ec2.cli set awsAccessKey KEY` & `ec2.cli set awsSecretKey KEY` if you do not use `~/.aws/credentials`
+* `AWS_ACCESS_KEY_ID` `AWS_SECRET_ACCESS_KEY` environment variables are used by default
+
+### optional
 * `ec2.cli set cert FILELOC` define where to find your SSH private file
 * `ec2.cli set user USERNAME` if you use a different username on your EC2 machines than the current user
 * `ec2.cli set region AWSREGION` if your machines are not located in `eu-west-1`
