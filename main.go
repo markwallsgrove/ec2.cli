@@ -203,6 +203,10 @@ func loadProfileFromFile(location string) (error, Profile) {
 }
 
 func trimSurroundingQuotes(str string) string {
+	if str == "" {
+		return str
+	}
+
 	lastChar := len(str) - 1
 	if str[0] == '\'' && str[lastChar] == '\'' || str[0] == '"' && str[lastChar] == '"' {
 		str = str[1:lastChar]
@@ -472,8 +476,9 @@ func main() {
 
 	app.Commands = []cli.Command{
 		{
-			Name:  "set",
-			Usage: "Set a property of a profile",
+			Name:   "set",
+			Usage:  "Set a property or view all values of a profile (provide no key/value)",
+			Action: actionViewConfig,
 			Subcommands: []cli.Command{
 				{
 					Name:  "awsSecretKey",
@@ -719,6 +724,28 @@ func main() {
 	}
 
 	app.Run(os.Args)
+}
+
+func actionViewConfig(c *cli.Context) {
+	err, profile := loadProfile(c, true)
+	if err != nil {
+		panic(err)
+	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Key", "Value"})
+
+	table.Append([]string{"Name", profile.Name})
+	table.Append([]string{"Region", profile.Region})
+	table.Append([]string{"User", profile.User})
+	table.Append([]string{"Cert", profile.CertLocation})
+	table.Append([]string{"MaxCacheAge", fmt.Sprintf("%d", profile.MaxCacheAge)})
+	table.Append([]string{"Alias", profile.AliasPrefix})
+	table.Append([]string{"AWSProfile", profile.AWSProfile})
+	table.Append([]string{"AWSAccessKey", profile.AWSSecretKey})
+	table.Append([]string{"AWSSecretKey", profile.AWSAccessKey})
+
+	table.Render()
 }
 
 func writeConfig(loc string, content []byte) error {
