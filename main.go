@@ -409,7 +409,7 @@ func main() {
 	app := cli.NewApp()
 	app.Name = "ec2.cli"
 	app.Usage = "quickly gain access to EC2 machines"
-	app.Version = "0.5.0"
+	app.Version = "0.5.1"
 	app.EnableBashCompletion = true
 	app.Version = version
 
