@@ -11,7 +11,7 @@
 The following items might need changing depending on your environment.
 
 ### mandatory
-* recommended - `ec2.cli set awsAccessKey KEY` & `ec2.cli set awsSecretKey KEY` if you do not use `~/.aws/credentials`
+* recommended - `ec2.cli set awsAccessKey KEY` & `ec2.cli set awsSecretKey KEY`
 * If you use `~/.aws/credentials`, execute `ec2.cli set awsProfile PROFILE` to set the name of the profile, or
 * `AWS_ACCESS_KEY_ID` `AWS_SECRET_ACCESS_KEY` environment variables are used by default
 
