@@ -34,6 +34,7 @@ var releasesAPI string = "https://api.github.com/repos/markwallsgrove/ssh_alias_
 var version string = "0.5.1"
 var baseDir string
 var homeDir string
+var currentUsername string
 
 func init() {
 	currentUser, err := user.Current()
@@ -41,6 +42,7 @@ func init() {
 		panic(err)
 	}
 
+	currentUsername = currentUser.Username
 	homeDir = currentUser.HomeDir
 	baseDir = fmt.Sprintf("%s/.ec2.cli", currentUser.HomeDir)
 }
@@ -238,6 +240,8 @@ func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
 
 	if user := trimSurroundingQuotes(context.GlobalString("user")); user != "" {
 		profile.User = user
+	} else if profile.User == "" {
+		profile.User = currentUsername
 	}
 
 	if cert := trimSurroundingQuotes(context.GlobalString("cert")); cert != "" {
