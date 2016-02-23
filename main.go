@@ -31,7 +31,7 @@ import (
 )
 
 var releasesAPI string = "https://api.github.com/repos/markwallsgrove/ssh_alias_ec2/releases"
-var version string = "0.5.1"
+var version string = "0.5.2"
 var baseDir string
 var homeDir string
 var currentUsername string
