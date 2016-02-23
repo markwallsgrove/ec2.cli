@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 )
 
@@ -171,6 +172,11 @@ type Instance struct {
 	InstanceType  string
 	CertName      string
 	Tags          []string
+}
+
+type TemplateData struct {
+	Profile Profile
+	Host    string
 }
 
 type Profile struct {
@@ -421,6 +427,34 @@ func getInstances(region string, maxCacheAge int, profile Profile) (error, map[s
 	return nil, instances
 }
 
+func bashCompleteInstanceName(c *cli.Context) {
+	if len(c.Args()) > 0 {
+		return
+	}
+
+	err, profile := loadProfile(c, true)
+	if err != nil {
+		panic(err)
+	}
+
+	maxCacheAge := profile.MaxCacheAge
+	if c.GlobalBool("flushCache") == true {
+		maxCacheAge = 0
+	}
+
+	err, instances := getInstances(profile.Region, maxCacheAge, profile)
+	if err != nil {
+		panic(err)
+	}
+
+	fuzzyTag := c.String("tag")
+	for name := range instances {
+		if fuzzyTag == "" || fuzzy.SequenceMatch(fuzzyTag, name) {
+			fmt.Println(name)
+		}
+	}
+}
+
 func main() {
 	app := cli.NewApp()
 	app.Name = "ec2.cli"
@@ -478,6 +512,13 @@ func main() {
 	}
 
 	app.Commands = []cli.Command{
+		{
+			// TODO: filter by tag
+			Name:         "cmd",
+			Usage:        "Execute a command for each matching instance name",
+			Action:       actionCmd,
+			BashComplete: bashCompleteInstanceName,
+		},
 		{
 			Name:   "set",
 			Usage:  "Set a property or view all values of a profile (provide no key/value)",
@@ -704,33 +745,7 @@ func main() {
 					Usage: "fuzzy find against a machine's tags",
 				},
 			},
-			BashComplete: func(c *cli.Context) {
-				if len(c.Args()) > 0 {
-					return
-				}
-
-				err, profile := loadProfile(c, true)
-				if err != nil {
-					panic(err)
-				}
-
-				maxCacheAge := profile.MaxCacheAge
-				if c.GlobalBool("flushCache") == true {
-					maxCacheAge = 0
-				}
-
-				err, instances := getInstances(profile.Region, maxCacheAge, profile)
-				if err != nil {
-					panic(err)
-				}
-
-				fuzzyTag := c.String("tag")
-				for name := range instances {
-					if fuzzyTag == "" || fuzzy.SequenceMatch(fuzzyTag, name) {
-						fmt.Println(name)
-					}
-				}
-			},
+			BashComplete: bashCompleteInstanceName,
 		},
 	}
 
@@ -851,7 +866,7 @@ func actionSetup(c *cli.Context) {
 
 func actionSSH(c *cli.Context) {
 	if len(c.Args()) != 1 {
-		exit("ssh <instance-name>")
+		exit("expected <instance-name>")
 	}
 
 	err, profile := loadProfile(c, true)
@@ -859,24 +874,59 @@ func actionSSH(c *cli.Context) {
 		panic(err)
 	}
 
+	runInstanceCmd(profile, c.GlobalBool("flushCache"), c.Args()[0], "ssh -i {cert} {user}@{host}")
+}
+
+func actionCmd(c *cli.Context) {
+	if len(c.Args()) != 2 {
+		exit("expected <instance-name> <template>")
+	}
+
+	err, profile := loadProfile(c, true)
+	if err != nil {
+		panic(err)
+	}
+
+	runInstanceCmd(profile, c.GlobalBool("flushCache"), c.Args()[0], c.Args()[1])
+}
+
+func runInstanceCmd(profile Profile, flushCache bool, hostPattern string, templateContent string) {
 	maxCacheAge := profile.MaxCacheAge
-	if c.GlobalBool("flushCache") == true {
+	if flushCache == true {
 		maxCacheAge = 0
 	}
 
 	err, instances := getInstances(profile.Region, maxCacheAge, profile)
 
 	var host string
-	if instance, ok := instances[trimSurroundingQuotes(c.Args().First())]; ok {
+	// TODO: for each host that matches search
+	// TODO: for each key
+	if instance, ok := instances[trimSurroundingQuotes(hostPattern)]; ok {
 		host = instance.Addr
 	} else {
-		exit(fmt.Sprintf("Unknown instance: %s\n%+v", c.Args().First(), instances))
+		exit(fmt.Sprintf("Unknown instance: %s\n%+v", hostPattern, instances))
 	}
 
-	cmd := exec.Command(
-		"ssh", "-i", profile.CertLocation,
-		fmt.Sprintf("%s@%s", profile.User, host),
-	)
+	// TODO: template needs templating
+	fmt.Println("template content", templateContent)
+	tmpl, err := template.New("cmd").Parse("echo {{.Host}}") //templateContent)
+	if err != nil {
+		panic(err)
+	}
+
+	cmdBuffer := bytes.NewBufferString("")
+	err = tmpl.Execute(cmdBuffer, TemplateData{
+		Profile: profile,
+		Host:    host,
+	})
+
+	if err != nil {
+		exit(fmt.Sprintf("Error while creating template: %s", err.Error()))
+	}
+
+	cmdSplit := strings.Split(" ", cmdBuffer.String())
+	fmt.Println("Executing ", strings.Join(cmdSplit, " "))
+	cmd := exec.Command(cmdSplit[0], cmdSplit[1:]...)
 
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
