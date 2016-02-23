@@ -877,10 +877,17 @@ func actionSSH(c *cli.Context) {
 		exit(fmt.Sprintf("Unknown instance: %s\n%+v", c.Args().First(), instances))
 	}
 
-	cmd := exec.Command(
-		"ssh", "-i", profile.CertLocation,
-		fmt.Sprintf("%s@%s", profile.User, host),
-	)
+	var cmd *exec.Cmd
+	if profile.CertLocation != "" {
+		cmd = exec.Command(
+			"ssh", "-i", profile.CertLocation,
+			fmt.Sprintf("%s@%s", profile.User, host),
+		)
+	} else {
+		cmd = exec.Command(
+			"ssh", fmt.Sprintf("%s@%s", profile.User, host),
+		)
+	}
 
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
