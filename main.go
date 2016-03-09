@@ -72,7 +72,6 @@ autoload -U compinit && compinit
 autoload -U bashcompinit && bashcompinit
 
 export PATH="$PATH:$HOME/.ec2.cli"
-script_dir=$(dirname $0)
 if [ -f ~/.ec2.cli/completion.bash ]; then
 	source ~/.ec2.cli/completion.bash
 fi
