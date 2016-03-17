@@ -1048,6 +1048,12 @@ func actionUpdate(c *cli.Context) {
 	}
 }
 
+func removePatchFiles(files []string) {
+	for _, file := range files {
+		os.Remove(file)
+	}
+}
+
 func applyPatch(filesLoc string, downgrade bool) error {
 	fmt.Println("patching...")
 
@@ -1061,6 +1067,8 @@ func applyPatch(filesLoc string, downgrade bool) error {
 	hashLoc := path.Join(filesLoc, fmt.Sprintf("%s-%s-%s.hash", direction, runtime.GOOS, runtime.GOARCH))
 	sigLoc := path.Join(filesLoc, fmt.Sprintf("%s-%s-%s.sig", direction, runtime.GOOS, runtime.GOARCH))
 	diffLoc := path.Join(filesLoc, fmt.Sprintf("%s-%s-%s.diff", direction, runtime.GOOS, runtime.GOARCH))
+
+	defer removePatchFiles([]string{hashLoc, sigLoc, diffLoc})
 
 	_, hashLocErr := os.Stat(hashLoc)
 	_, sigLocErr := os.Stat(sigLoc)
