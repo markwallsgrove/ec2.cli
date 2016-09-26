@@ -15,6 +15,7 @@ import (
 	"github.com/inconshreveable/go-update"
 	"github.com/kardianos/osext"
 	"github.com/olekukonko/tablewriter"
+	"github.com/op/go-logging"
 	"github.com/toumorokoshi/go-fuzzy/fuzzy"
 	"io"
 	"io/ioutil"
@@ -31,20 +32,32 @@ import (
 )
 
 var releasesAPI string = "https://api.github.com/repos/markwallsgrove/ssh_alias_ec2/releases"
-var version string = "0.5.2"
+var version string = "0.5.3"
 var baseDir string
 var homeDir string
 var currentUsername string
 
+var log = logging.MustGetLogger("example")
+var logFormat = logging.MustStringFormatter(
+	`%{color}%{time:15:04:05.000} %{shortfunc} ▶ %{level:.4s} %{id:03x}%{color:reset} %{message}`,
+)
+var backend = logging.NewLogBackend(os.Stderr, "", 0)
+var formatter = logging.NewBackendFormatter(backend, logFormat)
+
 func init() {
+	logging.SetBackend(formatter)
+
 	currentUser, err := user.Current()
 	if err != nil {
-		panic(err)
+		log.Error("Cannot retrieve current user", err)
+		os.Exit(1)
 	}
 
 	currentUsername = currentUser.Username
 	homeDir = currentUser.HomeDir
 	baseDir = fmt.Sprintf("%s/.ec2.cli", currentUser.HomeDir)
+	log.Debug("base directory", baseDir)
+	log.Debug("current user", currentUsername)
 }
 
 var bashrcCall = []byte(`
@@ -95,6 +108,8 @@ var backwardsAssetFilePattern = regexp.MustCompile(fmt.Sprintf(
 ))
 
 func downloadFile(uri string, loc string, errChannel chan error) {
+	log.Debug("downloading", uri, "to", loc)
+
 	output, err := os.Create(loc)
 	if err != nil {
 		errChannel <- err
@@ -138,7 +153,6 @@ func (release *Release) DownloadAssets(pattern regexp.Regexp, location string) e
 			continue
 		}
 
-		fmt.Println("Downloading", asset.DownloadUrl, "to", path.Join(location, asset.Name))
 		go downloadFile(asset.DownloadUrl, path.Join(location, asset.Name), errChannel)
 		downloading += 1
 	}
@@ -187,8 +201,12 @@ type Profile struct {
 }
 
 func loadProfileFromFile(location string) (error, Profile) {
-	if _, err := os.Stat(location); os.IsNotExist(err) {
-		return nil, Profile{}
+	var profile Profile
+
+	log.Debug("loading profile from", location)
+
+	if _, err := os.Stat(location); err != nil {
+		return err, Profile{}
 	}
 
 	profileBytes, err := ioutil.ReadFile(location)
@@ -196,9 +214,7 @@ func loadProfileFromFile(location string) (error, Profile) {
 		return err, Profile{}
 	}
 
-	var profile Profile
-	err = json.Unmarshal(profileBytes, &profile)
-	if err != nil {
+	if err = json.Unmarshal(profileBytes, &profile); err != nil {
 		return err, Profile{}
 	}
 
@@ -218,17 +234,17 @@ func trimSurroundingQuotes(str string) string {
 	return str
 }
 
-func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
+func loadProfile(context *cli.Context, useEnvValues bool) Profile {
 	location := fmt.Sprintf("%s/config/%s.json", baseDir, context.GlobalString("profile"))
 	err, profile := loadProfileFromFile(location)
 	if err != nil {
-		return err, profile
+		log.Error("Cannot load profile from", location, "due to", err)
 	}
 
 	profile.Name = trimSurroundingQuotes(context.GlobalString("profile"))
 
 	if useEnvValues == false {
-		return nil, profile
+		return profile
 	}
 
 	if region := trimSurroundingQuotes(context.GlobalString("region")); region != "" {
@@ -247,7 +263,9 @@ func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
 		profile.CertLocation = cert
 	}
 
-	if maxCacheAge := context.GlobalInt("maxCacheAge"); maxCacheAge != -1 {
+	if context.GlobalBool("flushCache") == true {
+		profile.MaxCacheAge = 0
+	} else if maxCacheAge := context.GlobalInt("maxCacheAge"); maxCacheAge != -1 {
 		profile.MaxCacheAge = maxCacheAge
 	} else if profile.MaxCacheAge == 0 {
 		profile.MaxCacheAge = 300
@@ -269,7 +287,8 @@ func loadProfile(context *cli.Context, useEnvValues bool) (error, Profile) {
 		profile.AWSSecretKey = awsSecretKey
 	}
 
-	return nil, profile
+	log.Debug("constructed profile", fmt.Sprintf("%+v\n", profile))
+	return profile
 }
 
 func (profile *Profile) save() error {
@@ -283,6 +302,8 @@ func (profile *Profile) save() error {
 
 	configLoc := fmt.Sprintf("%s/config/%s.json", baseDir, profile.Name)
 	configBytes, err := json.MarshalIndent(profile, "", "    ")
+	log.Debug("saving profile to", configLoc)
+
 	if err != nil {
 		return err
 	}
@@ -294,100 +315,116 @@ func (i *Instance) getNormalisedName() string {
 	return fmt.Sprintf("%s_%s", regexWhiteChars.ReplaceAllString(i.Name, "_"), i.Id)
 }
 
-func exit(msg string) {
-	fmt.Fprint(os.Stderr, msg)
-	os.Exit(1)
+func exit(msg ...interface{}) {
+	if len(msg) == 1 && msg[0] == nil {
+		os.Exit(0)
+	} else {
+		log.Error(msg)
+		os.Exit(1)
+	}
 }
 
-func getInstanceCache(region string, profile string, maxAge int) map[string]*Instance {
-	cacheLocation := fmt.Sprintf("%s/cache/%s_%s.cache", baseDir, profile, region)
+func getInstanceCache(profile Profile) map[string]*Instance {
+	cache := map[string]*Instance{}
+
+	cacheLocation := fmt.Sprintf("%s/cache/%s_%s.cache", baseDir, profile.Name, profile.Region)
+	log.Debug("loading cache from", cacheLocation)
+
 	if info, err := os.Stat(cacheLocation); err != nil {
-		return nil
-	} else if maxAge == 0 {
+		log.Debug("could not load cache", err)
+		return cache
+	} else if profile.MaxCacheAge == 0 {
+		log.Debug("cache expiry set to zero, removing")
 		os.Remove(cacheLocation)
-		return nil
-	} else if int(time.Since(info.ModTime()).Seconds()) > maxAge {
-		return nil
+		return cache
+	} else if int(time.Since(info.ModTime()).Seconds()) > profile.MaxCacheAge {
+		log.Debug("cache has expired, removing")
+		return cache
 	}
 
 	contents, err := ioutil.ReadFile(cacheLocation)
 	if err != nil {
-		return nil
+		log.Error("cannot read cache, ignoring, ", err)
+		return cache
 	}
 
 	buffer := bytes.Buffer{}
 	buffer.Write(contents)
 
-	cache := map[string]*Instance{}
 	d := gob.NewDecoder(&buffer)
 	err = d.Decode(&cache)
 
 	if err != nil {
-		return nil
+		log.Error("cannot decode cache,", err)
 	}
 
 	return cache
 }
 
-func storeInstanceCache(region string, profile string, cache map[string]*Instance) error {
+func storeInstanceCache(profile Profile, cache map[string]*Instance) error {
 	if err := os.MkdirAll(fmt.Sprintf("%s/cache", baseDir), 0770); err != nil {
+		log.Error("cannot create cache directory,", err)
 		return err
 	}
 
-	cacheLocation := fmt.Sprintf("%s/cache/%s_%s.cache", baseDir, profile, region)
+	cacheLocation := fmt.Sprintf("%s/cache/%s_%s.cache", baseDir, profile.Name, profile.Region)
 
 	buffer := bytes.Buffer{}
 	encoder := gob.NewEncoder(&buffer)
 	err := encoder.Encode(cache)
 
 	if err != nil {
+		log.Error("cannot encode cache,", err)
 		return err
 	}
 
-	err = ioutil.WriteFile(cacheLocation, buffer.Bytes(), 0770)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	log.Debug("writing cache to", cacheLocation)
+	return ioutil.WriteFile(cacheLocation, buffer.Bytes(), 0770)
 }
 
-func getInstances(region string, maxCacheAge int, profile Profile) (error, map[string]*Instance) {
-	instances := getInstanceCache(region, profile.Name, maxCacheAge)
-	if instances != nil {
+func getInstances(profile Profile) (error, map[string]*Instance) {
+	instances := getInstanceCache(profile)
+	awsCredentialsLoc := fmt.Sprintf("%s/.aws/credentials", homeDir)
+
+	if len(instances) > 0 {
+		log.Debug("loaded instances from cache")
 		return nil, instances
 	}
 
 	var creds *credentials.Credentials
 	if profile.AWSAccessKey != "" && profile.AWSSecretKey != "" {
+		log.Debug("using access/secret keys from profile")
 		creds = credentials.NewStaticCredentials(
 			profile.AWSAccessKey,
 			profile.AWSSecretKey,
 			"",
 		)
 	} else if profile.AWSProfile != "" {
+		log.Debug("loading shared credentials from", awsCredentialsLoc)
 		creds = credentials.NewSharedCredentials(
-			fmt.Sprintf("%s/.aws/credentials", homeDir),
+			awsCredentialsLoc,
 			profile.AWSProfile,
 		)
 	} else {
+		log.Debug("using environmental aws access/secret keys")
 		creds = credentials.NewEnvCredentials()
 	}
 
 	config := aws.Config{Credentials: creds}
 
-	if region != "" {
-		config.Region = aws.String(region)
+	if profile.Region != "" {
+		log.Debug("using region", profile.Region)
+		config.Region = aws.String(profile.Region)
 	}
 
 	svc := ec2.New(session.New(), &config)
 	resp, err := svc.DescribeInstances(nil)
 
 	if err != nil {
-		return err, nil
+		log.Error("cannot describe instances", err)
+		return err, instances
 	}
 
-	instances = make(map[string]*Instance)
 	for _, res := range resp.Reservations {
 		for _, inst := range res.Instances {
 			instance := new(Instance)
@@ -413,15 +450,13 @@ func getInstances(region string, maxCacheAge int, profile Profile) (error, map[s
 
 			if instance.Name != "" && instance.Addr != "" {
 				instances[instance.getNormalisedName()] = instance
+			} else {
+				log.Debug("instance has no name or address", fmt.Sprintf("%+v\n", instance))
 			}
 		}
 	}
 
-	if err = storeInstanceCache(region, profile.Name, instances); err != nil {
-		return err, nil
-	}
-
-	return nil, instances
+	return storeInstanceCache(profile, instances), instances
 }
 
 func main() {
@@ -482,26 +517,25 @@ func main() {
 
 	app.Commands = []cli.Command{
 		{
-			Name:   "set",
-			Usage:  "Set a property or view all values of a profile (provide no key/value)",
-			Action: actionViewConfig,
+			Name:  "set",
+			Usage: "Set a property or view all values of a profile (provide no key/value)",
+			Action: func(context *cli.Context) {
+				actionViewConfig(loadProfile(context, true))
+			},
 			Subcommands: []cli.Command{
 				{
 					Name:  "awsSecretKey",
 					Usage: "Set the AWS Secret Key to use within this profile",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, false)
-						if err != nil {
-							panic(err)
-						}
+						profile := loadProfile(context, false)
 
 						if len(context.Args()) != 1 {
-							exit("Invalid amount of arguments. Expected awsProfile.")
+							exit("invalid amount of arguments, expected awsProfile")
 						}
 
 						profile.AWSSecretKey = trimSurroundingQuotes(context.Args().First())
-						if err = profile.save(); err != nil {
-							panic(err)
+						if err := profile.save(); err != nil {
+							exit("cannot save profile", err)
 						}
 					},
 				},
@@ -509,18 +543,15 @@ func main() {
 					Name:  "awsAccessKey",
 					Usage: "Set the AWS Access Key to use within this profile",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, false)
-						if err != nil {
-							panic(err)
-						}
+						profile := loadProfile(context, false)
 
 						if len(context.Args()) != 1 {
-							exit("Invalid amount of arguments. Expected awsProfile.")
+							exit("invalid amount of arguments, expected awsProfile")
 						}
 
 						profile.AWSAccessKey = trimSurroundingQuotes(context.Args().First())
-						if err = profile.save(); err != nil {
-							panic(err)
+						if err := profile.save(); err != nil {
+							exit("cannot save profile", err)
 						}
 					},
 				},
@@ -528,18 +559,15 @@ func main() {
 					Name:  "awsProfile",
 					Usage: "AWS profile to use",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, false)
-						if err != nil {
-							panic(err)
-						}
+						profile := loadProfile(context, false)
 
 						if len(context.Args()) != 1 {
-							exit("Invalid amount of arguments. Expected awsProfile.")
+							exit("invalid amount of arguments, expected awsProfile")
 						}
 
 						profile.AWSProfile = trimSurroundingQuotes(context.Args().First())
-						if err = profile.save(); err != nil {
-							panic(err)
+						if err := profile.save(); err != nil {
+							exit("cannot save profile", err)
 						}
 					},
 				},
@@ -547,13 +575,10 @@ func main() {
 					Name:  "envvars",
 					Usage: "Special command to save the environment variables into the configuration file",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, true)
-						if err != nil {
-							panic(err)
-						}
+						profile := loadProfile(context, true)
 
-						if err = profile.save(); err != nil {
-							panic(err)
+						if err := profile.save(); err != nil {
+							exit("cannot save profile", err)
 						}
 					},
 				},
@@ -561,18 +586,15 @@ func main() {
 					Name:  "region",
 					Usage: "Set AWS region to connect to",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, false)
-						if err != nil {
-							panic(err)
-						}
+						profile := loadProfile(context, false)
 
 						if len(context.Args()) != 1 {
-							exit("Invalid amount of arguments. Expected region.")
+							exit("invalid amount of arguments, expected region")
 						}
 
 						profile.Region = trimSurroundingQuotes(context.Args().First())
-						if err = profile.save(); err != nil {
-							panic(err)
+						if err := profile.save(); err != nil {
+							exit("cannot save profile", err)
 						}
 					},
 				},
@@ -580,18 +602,15 @@ func main() {
 					Name:  "user",
 					Usage: "Set the SSH username to connect to the machine with",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, false)
-						if err != nil {
-							panic(err)
-						}
+						profile := loadProfile(context, false)
 
 						if len(context.Args()) != 1 {
-							exit("Invalid amount of arguments. Expected user.")
+							exit("invalid amount of arguments, expected user")
 						}
 
 						profile.User = trimSurroundingQuotes(context.Args().First())
-						if err = profile.save(); err != nil {
-							panic(err)
+						if err := profile.save(); err != nil {
+							exit("cannot save profile", err)
 						}
 					},
 				},
@@ -599,23 +618,13 @@ func main() {
 					Name:  "cert",
 					Usage: "Location of the certificate to use when connecting to a machine",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, false)
-						if err != nil {
-							panic(err)
-						}
-
-						if len(context.Args()) != 1 {
-							exit("Invalid amount of arguments. Expected certicate location.")
-						}
-
+						profile := loadProfile(context, false)
 						profile.CertLocation = trimSurroundingQuotes(context.Args().First())
 
 						if _, err := os.Stat(profile.CertLocation); os.IsNotExist(err) {
-							exit("Cannot find file")
-						}
-
-						if err = profile.save(); err != nil {
-							panic(err)
+							exit("cannot find certificate file", profile.CertLocation)
+						} else {
+							exit(profile.save())
 						}
 					},
 				},
@@ -623,51 +632,34 @@ func main() {
 					Name:  "maxCacheAge",
 					Usage: "Maximum age in seconds to cache a AWS API call",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, false)
-						if err != nil {
-							panic(err)
-						}
-
-						if len(context.Args()) != 1 {
-							exit("Invalid amount of arguments. Expected maximum cache age.")
-						}
+						profile := loadProfile(context, false)
 
 						maxCacheAge, err := strconv.Atoi(trimSurroundingQuotes(context.Args().First()))
 						if err != nil {
-							exit("First argument must be a integer")
+							maxCacheAge = 300
 						}
 
 						profile.MaxCacheAge = maxCacheAge
-						if err = profile.save(); err != nil {
-							panic(err)
-						}
+						exit(profile.save())
 					},
 				},
 				{
 					Name:  "prefix",
 					Usage: "Prefix to append to the alias name when generating aliases",
 					Action: func(context *cli.Context) {
-						err, profile := loadProfile(context, false)
-						if err != nil {
-							panic(err)
-						}
-
-						if len(context.Args()) != 1 {
-							exit("Invalid amount of arguments. Expected SSH alias prefix.")
-						}
-
+						profile := loadProfile(context, false)
 						profile.AliasPrefix = trimSurroundingQuotes(context.Args().First())
-						if err = profile.save(); err != nil {
-							panic(err)
-						}
+						exit(profile.save())
 					},
 				},
 			},
 		},
 		{
-			Name:   "update",
-			Usage:  "Update to a later version",
-			Action: actionUpdate,
+			Name:  "update",
+			Usage: "Update to a later version",
+			Action: func(context *cli.Context) {
+				exit(actionUpdate(context.Bool("downgrade")))
+			},
 			Flags: []cli.Flag{
 				cli.BoolFlag{
 					Name:  "downgrade",
@@ -676,9 +668,11 @@ func main() {
 			},
 		},
 		{
-			Name:   "setup",
-			Usage:  "Setup auto complete",
-			Action: actionSetup,
+			Name:  "setup",
+			Usage: "Setup auto complete",
+			Action: func(context *cli.Context) {
+				exit(actionSetup())
+			},
 		},
 		{
 			Name:  "alias",
@@ -690,17 +684,28 @@ func main() {
 					EnvVar: "AE_SSH_ALIAS_PREFIX",
 				},
 			},
-			Action: actionAlias,
+			Action: func(context *cli.Context) {
+				exit(actionAlias(loadProfile(context, true)))
+			},
 		},
 		{
-			Name:   "status",
-			Usage:  "display the status of all ec2 instances",
-			Action: actionStatus,
+			Name:  "status",
+			Usage: "display the status of all ec2 instances",
+			Action: func(context *cli.Context) {
+				exit(actionStatus(loadProfile(context, true)))
+			},
 		},
 		{
-			Name:   "ssh",
-			Usage:  "ssh to a given machine",
-			Action: actionSSH,
+			Name:  "ssh",
+			Usage: "ssh to a given machine",
+			Action: func(context *cli.Context) {
+				profile := loadProfile(context, true)
+				if len(context.Args()) != 1 {
+					exit(actionListInstances(profile, ""))
+				} else {
+					exit(actionSSH(profile, context.Args().First()))
+				}
+			},
 			Flags: []cli.Flag{
 				cli.StringFlag{
 					Name:  "tag",
@@ -712,27 +717,9 @@ func main() {
 					return
 				}
 
-				err, profile := loadProfile(c, true)
-				if err != nil {
-					panic(err)
-				}
-
-				maxCacheAge := profile.MaxCacheAge
-				if c.GlobalBool("flushCache") == true {
-					maxCacheAge = 0
-				}
-
-				err, instances := getInstances(profile.Region, maxCacheAge, profile)
-				if err != nil {
-					panic(err)
-				}
-
-				fuzzyTag := c.String("tag")
-				for name := range instances {
-					if fuzzyTag == "" || fuzzy.SequenceMatch(fuzzyTag, name) {
-						fmt.Println(name)
-					}
-				}
+				profile := loadProfile(c, true)
+				tag := c.String("tag")
+				exit(actionListInstances(profile, tag))
 			},
 		},
 	}
@@ -740,12 +727,18 @@ func main() {
 	app.Run(os.Args)
 }
 
-func actionViewConfig(c *cli.Context) {
-	err, profile := loadProfile(c, true)
-	if err != nil {
-		panic(err)
+func actionListInstances(profile Profile, fuzzyTag string) error {
+	err, instances := getInstances(profile)
+	for name := range instances {
+		if fuzzyTag == "" || fuzzy.SequenceMatch(fuzzyTag, name) {
+			fmt.Println(name)
+		}
 	}
 
+	return err
+}
+
+func actionViewConfig(profile Profile) {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Key", "Value"})
 
@@ -809,7 +802,7 @@ func cp(src, dst string) error {
 	return d.Close()
 }
 
-func actionSetup(c *cli.Context) {
+func actionSetup() error {
 	aeCompletionLoc := fmt.Sprintf("%s/completion.bash", baseDir)
 	aeExecLoc := fmt.Sprintf("%s/ec2.cli", baseDir)
 	bashrcLoc := fmt.Sprintf("%s/.bashrc", homeDir)
@@ -817,111 +810,101 @@ func actionSetup(c *cli.Context) {
 	zshrcLoc := fmt.Sprintf("%s/.zshrc", homeDir)
 
 	if err := os.Mkdir(baseDir, 0775); os.IsExist(err) {
-		exit(fmt.Sprintf("ec2.cli is already installed, remove %s and try again", baseDir))
+		return errors.New(fmt.Sprintf("ec2.cli is already installed, remove %s and try again", baseDir))
 	} else if err != nil {
-		panic(err)
+		return err
 	} else {
-		fmt.Println(fmt.Sprintf("created %s", baseDir))
+		log.Debug(fmt.Sprintf("created %s", baseDir))
 	}
 
 	currExecLoc, _ := osext.Executable()
 	if err := cp(currExecLoc, aeExecLoc); err != nil {
-		panic(err)
+		return err
 	}
 
 	if err := os.Chmod(aeExecLoc, 0775); err != nil {
-		panic(err)
+		return err
 	}
 
 	if err := ioutil.WriteFile(aeCompletionLoc, bashAutoComplete, 0775); err != nil {
-		panic(err)
+		return err
 	}
 
 	if _, err := os.Stat(bashProfileLoc); err == nil {
 		if err := writeConfig(bashProfileLoc, bashrcCall); err != nil {
-			panic(err)
+			return err
 		}
 	} else if err := writeConfig(bashrcLoc, bashrcCall); err != nil {
-		panic(err)
+		return err
 	}
 
 	if _, err := os.Stat(zshrcLoc); err == nil {
 		if err = writeConfig(zshrcLoc, zshAutoComplete); err != nil {
-			panic(err)
+			return err
 		}
 	}
+
+	return nil
 }
 
-func actionSSH(c *cli.Context) {
-	if len(c.Args()) != 1 {
-		exit("ssh <instance-name>")
+func templateSSHUsernameAtHost(user string, host string) string {
+	return fmt.Sprintf("%s@%s", user, host)
+}
+
+func findInstanceByHostname(profile Profile, hostName string) (error, *Instance) {
+	err, instances := getInstances(profile)
+	instance := &Instance{}
+
+	if err == nil {
+		log.Debug("looking for instance", hostName)
+		instance, found := instances[trimSurroundingQuotes(hostName)]
+
+		if !found {
+			err = errors.New(fmt.Sprintf("unknown instance: %s", hostName))
+		}
+
+		return err, instance
 	}
 
-	err, profile := loadProfile(c, true)
-	if err != nil {
-		panic(err)
-	}
+	return err, instance
+}
 
-	maxCacheAge := profile.MaxCacheAge
-	if c.GlobalBool("flushCache") == true {
-		maxCacheAge = 0
-	}
-
-	err, instances := getInstances(profile.Region, maxCacheAge, profile)
-
-	var host string
-	if instance, ok := instances[trimSurroundingQuotes(c.Args().First())]; ok {
-		host = instance.Addr
-	} else {
-		exit(fmt.Sprintf("Unknown instance: %s\n%+v", c.Args().First(), instances))
-	}
-
+func createSSHCmd(profile Profile, instance *Instance) *exec.Cmd {
 	var cmd *exec.Cmd
+	usernameAtHost := templateSSHUsernameAtHost(profile.User, instance.Addr)
 	if profile.CertLocation != "" {
-		cmd = exec.Command(
-			"ssh", "-i", profile.CertLocation,
-			fmt.Sprintf("%s@%s", profile.User, host),
-		)
+		cmd = exec.Command("ssh", "-i", profile.CertLocation, usernameAtHost)
 	} else {
-		cmd = exec.Command(
-			"ssh", fmt.Sprintf("%s@%s", profile.User, host),
-		)
+		cmd = exec.Command("ssh", usernameAtHost)
 	}
 
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-
-	err = cmd.Start()
-	if err != nil {
-		panic(err)
-	}
-
-	err = cmd.Wait()
-	if err != nil {
-		exit(err.Error())
-	}
+	log.Debug("created command", cmd)
+	return cmd
 }
 
-func actionStatus(c *cli.Context) {
-	err, profile := loadProfile(c, true)
-	if err != nil {
-		panic(err)
+func actionSSH(profile Profile, hostName string) error {
+	err, instance := findInstanceByHostname(profile, hostName)
+
+	if err == nil {
+		cmd := createSSHCmd(profile, instance)
+		cmd.Stdin = os.Stdin
+		cmd.Stderr = os.Stderr
+		cmd.Stdout = os.Stdout
+
+		log.Info("connecting..")
+		if err = cmd.Start(); err == nil {
+			err = cmd.Wait()
+		}
 	}
 
+	return err
+}
+
+func actionStatus(profile Profile) error {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Id", "Name", "Cert", "Type", "URL"})
 
-	maxCacheAge := profile.MaxCacheAge
-	if c.GlobalBool("flushCache") == true {
-		maxCacheAge = 0
-	}
-
-	err, instances := getInstances(profile.Region, maxCacheAge, profile)
-	if err != nil {
-		panic(err)
-	}
-
+	err, instances := getInstances(profile)
 	for _, instance := range instances {
 		table.Append([]string{
 			instance.Id, instance.Name,
@@ -930,34 +913,34 @@ func actionStatus(c *cli.Context) {
 		})
 	}
 
-	table.Render()
+	if err != nil {
+		table.Render()
+	}
+
+	return err
 }
 
-func actionAlias(c *cli.Context) {
-	err, profile := loadProfile(c, true)
-	if err != nil {
-		panic(err)
-	}
+func templateSSHCertLocation(profile Profile) (error, string) {
+	location := ""
 
-	sshCertificateLocation := ""
 	if profile.CertLocation != "" {
 		if _, err := os.Stat(profile.CertLocation); err != nil {
-			exit("Cannot find certificate")
+			return err, ""
 		}
 
-		sshCertificateLocation = fmt.Sprintf(" -i %s", profile.CertLocation)
+		location = fmt.Sprintf(" -i %s", profile.CertLocation)
 	}
 
-	maxCacheAge := profile.MaxCacheAge
-	if c.GlobalBool("flushCache") == true {
-		maxCacheAge = 0
-	}
+	return nil, location
+}
 
-	err, instances := getInstances(profile.Region, maxCacheAge, profile)
+func actionAlias(profile Profile) error {
+	err, sshCertificateLocation := templateSSHCertLocation(profile)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
+	err, instances := getInstances(profile)
 	for _, instance := range instances {
 		name := fmt.Sprintf("%s_%s", instance.Name, instance.Id)
 		name = regexWhiteChars.ReplaceAllString(name, "_")
@@ -967,6 +950,8 @@ func actionAlias(c *cli.Context) {
 			sshCertificateLocation, profile.User, instance.Addr,
 		))
 	}
+
+	return err
 }
 
 func getReleases() ([]Release, error) {
@@ -980,11 +965,7 @@ func getReleases() ([]Release, error) {
 	var releases []Release
 	decoder := json.NewDecoder(res.Body)
 	err = decoder.Decode(&releases)
-	if err != nil {
-		return []Release{}, err
-	}
-
-	return releases, nil
+	return releases, err
 }
 
 func getNextRelease(releases []Release, version string, downgrade bool) (Release, bool, bool) {
@@ -1004,26 +985,24 @@ func getNextRelease(releases []Release, version string, downgrade bool) (Release
 	return Release{}, false, false
 }
 
-func actionUpdate(c *cli.Context) {
+func actionUpdate(downgrade bool) error {
 	releases, err := getReleases()
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	if len(releases) < 2 {
-		exit("Zero new releases are available")
+		return errors.New("Zero new releases are available")
 	}
-
-	downgrade := c.Bool("downgrade")
 
 	release, latest, earliest := getNextRelease(releases, version, downgrade)
 	if release.Version == "" {
 		// TODO: could this happen after many updates? Does Github use pagination?
-		exit("ERROR: cannot find version information. Please re-download")
+		return errors.New("ERROR: cannot find version information. Please re-download")
 	} else if latest == true && downgrade == false {
-		exit("Latest version already installed")
+		return errors.New("Latest version already installed")
 	} else if downgrade == true && earliest == true {
-		exit("ec2.cli is already at the earliest available release")
+		return errors.New("ec2.cli is already at the earliest available release")
 	}
 
 	if downgrade {
@@ -1033,19 +1012,18 @@ func actionUpdate(c *cli.Context) {
 	}
 
 	if err != nil {
-		panic(err)
+		return err
 	}
 
-	err = applyPatch("/tmp", downgrade)
-	if err != nil {
-		panic(err)
-	}
-
-	if downgrade == true {
-		fmt.Println("successfully downgraded from", release.Version)
+	if err = applyPatch("/tmp", downgrade); err != nil {
+		return err
+	} else if downgrade == true {
+		log.Info("successfully downgraded from", release.Version)
 	} else {
-		fmt.Println("successfully updated from", release.Version)
+		log.Info("successfully updated from", release.Version)
 	}
+
+	return nil
 }
 
 func removePatchFiles(files []string) {
@@ -1055,7 +1033,7 @@ func removePatchFiles(files []string) {
 }
 
 func applyPatch(filesLoc string, downgrade bool) error {
-	fmt.Println("patching...")
+	log.Debug("patching...")
 
 	var direction string
 	if downgrade == true {
@@ -1080,25 +1058,25 @@ func applyPatch(filesLoc string, downgrade bool) error {
 
 	file, err := os.Open(diffLoc)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	// Signature of the new executable, signed by the private cert
 	signature, err := ioutil.ReadFile(sigLoc)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	// SHA-256 hash of the patch file
 	hash, err := ioutil.ReadFile(hashLoc)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	// Remove newline from the file
 	checksum, err := hex.DecodeString(strings.TrimSpace(string(hash)))
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	opts := update.Options{
@@ -1109,13 +1087,8 @@ func applyPatch(filesLoc string, downgrade bool) error {
 
 	err = opts.SetPublicKeyPEM(publicKey)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
-	err = update.Apply(file, opts)
-	if err != nil {
-		panic(err)
-	}
-
-	return nil
+	return update.Apply(file, opts)
 }
