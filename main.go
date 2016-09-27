@@ -234,6 +234,46 @@ func trimSurroundingQuotes(str string) string {
 	return str
 }
 
+func getProfile(context *cli.Context, regionDefault string) string {
+	if region := trimSurroundingQuotes(context.GlobalString("region")); region != "" {
+		return region
+	} else if regionDefault == "" {
+		return "eu-west-1"
+	}
+
+	return regionDefault
+}
+
+func getUser(context *cli.Context, userDefault string) string {
+	if user := trimSurroundingQuotes(context.GlobalString("user")); user != "" {
+		return user
+	} else if userDefault == "" {
+		return currentUsername
+	}
+
+	return userDefault
+}
+
+func getMaxCacheAge(context *cli.Context, defaultMaxCacheAge int) int {
+	if context.GlobalBool("flushCache") == true {
+		return 0
+	} else if maxCacheAge := context.GlobalInt("maxCacheAge"); maxCacheAge != -1 {
+		return maxCacheAge
+	} else if defaultMaxCacheAge == 0 {
+		return 300
+	}
+
+	return defaultMaxCacheAge
+}
+
+func getGlobalContextValue(name string, context *cli.Context, defaultValue interface{}) interface{} {
+	if value := trimSurroundingQuotes(context.String(name)); value != "" {
+		return value
+	}
+
+	return defaultValue
+}
+
 func loadProfile(context *cli.Context, useEnvValues bool) Profile {
 	location := fmt.Sprintf("%s/config/%s.json", baseDir, context.GlobalString("profile"))
 	err, profile := loadProfileFromFile(location)
@@ -247,45 +287,14 @@ func loadProfile(context *cli.Context, useEnvValues bool) Profile {
 		return profile
 	}
 
-	if region := trimSurroundingQuotes(context.GlobalString("region")); region != "" {
-		profile.Region = region
-	} else if profile.Region == "" {
-		profile.Region = "eu-west-1"
-	}
-
-	if user := trimSurroundingQuotes(context.GlobalString("user")); user != "" {
-		profile.User = user
-	} else if profile.User == "" {
-		profile.User = currentUsername
-	}
-
-	if cert := trimSurroundingQuotes(context.GlobalString("cert")); cert != "" {
-		profile.CertLocation = cert
-	}
-
-	if context.GlobalBool("flushCache") == true {
-		profile.MaxCacheAge = 0
-	} else if maxCacheAge := context.GlobalInt("maxCacheAge"); maxCacheAge != -1 {
-		profile.MaxCacheAge = maxCacheAge
-	} else if profile.MaxCacheAge == 0 {
-		profile.MaxCacheAge = 300
-	}
-
-	if prefix := trimSurroundingQuotes(context.String("prefix")); prefix != "" {
-		profile.AliasPrefix = prefix
-	}
-
-	if awsProfile := trimSurroundingQuotes(context.GlobalString("awsProfile")); awsProfile != "" {
-		profile.AWSProfile = awsProfile
-	}
-
-	if awsAccessKey := trimSurroundingQuotes(context.GlobalString("awsAccessKey")); awsAccessKey != "" {
-		profile.AWSAccessKey = awsAccessKey
-	}
-
-	if awsSecretKey := trimSurroundingQuotes(context.GlobalString("awsSecretKey")); awsSecretKey != "" {
-		profile.AWSSecretKey = awsSecretKey
-	}
+	profile.Region = getProfile(context, profile.Region)
+	profile.User = getUser(context, profile.User)
+	profile.CertLocation, _ = getGlobalContextValue("cert", context, profile.CertLocation).(string)
+	profile.MaxCacheAge = getMaxCacheAge(context, profile.MaxCacheAge)
+	profile.AliasPrefix, _ = getGlobalContextValue("prefix", context, profile.AliasPrefix).(string)
+	profile.AWSProfile, _ = getGlobalContextValue("awsProfile", context, profile.AWSProfile).(string)
+	profile.AWSAccessKey, _ = getGlobalContextValue("awsAccessKey", context, profile.AWSAccessKey).(string)
+	profile.AWSSecretKey, _ = getGlobalContextValue("awsSecretKey", context, profile.AWSSecretKey).(string)
 
 	log.Debug("constructed profile", fmt.Sprintf("%+v\n", profile))
 	return profile
@@ -382,16 +391,10 @@ func storeInstanceCache(profile Profile, cache map[string]*Instance) error {
 	return ioutil.WriteFile(cacheLocation, buffer.Bytes(), 0770)
 }
 
-func getInstances(profile Profile) (error, map[string]*Instance) {
-	instances := getInstanceCache(profile)
+func getAWSConfiguration(profile Profile) aws.Config {
 	awsCredentialsLoc := fmt.Sprintf("%s/.aws/credentials", homeDir)
-
-	if len(instances) > 0 {
-		log.Debug("loaded instances from cache")
-		return nil, instances
-	}
-
 	var creds *credentials.Credentials
+
 	if profile.AWSAccessKey != "" && profile.AWSSecretKey != "" {
 		log.Debug("using access/secret keys from profile")
 		creds = credentials.NewStaticCredentials(
@@ -410,8 +413,18 @@ func getInstances(profile Profile) (error, map[string]*Instance) {
 		creds = credentials.NewEnvCredentials()
 	}
 
-	config := aws.Config{Credentials: creds}
+	return aws.Config{Credentials: creds}
+}
 
+func getInstances(profile Profile) (error, map[string]*Instance) {
+	instances := getInstanceCache(profile)
+
+	if len(instances) > 0 {
+		log.Debug("loaded instances from cache")
+		return nil, instances
+	}
+
+	config := getAWSConfiguration(profile)
 	if profile.Region != "" {
 		log.Debug("using region", profile.Region)
 		config.Region = aws.String(profile.Region)
@@ -872,6 +885,7 @@ func findInstanceByHostname(profile Profile, hostName string) (error, *Instance)
 func createSSHCmd(profile Profile, instance *Instance) *exec.Cmd {
 	var cmd *exec.Cmd
 	usernameAtHost := templateSSHUsernameAtHost(profile.User, instance.Addr)
+
 	if profile.CertLocation != "" {
 		cmd = exec.Command("ssh", "-i", profile.CertLocation, usernameAtHost)
 	} else {
