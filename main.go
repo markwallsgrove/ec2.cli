@@ -3,18 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
-	"strings"
 
 	"github.com/codegangsta/cli"
+	"github.com/markwallsgrove/ec2.cli/actions"
 	"github.com/markwallsgrove/ec2.cli/install"
-	"github.com/markwallsgrove/ec2.cli/instances"
 	"github.com/markwallsgrove/ec2.cli/logging"
 	"github.com/markwallsgrove/ec2.cli/profile"
 	"github.com/markwallsgrove/ec2.cli/update"
-	"github.com/olekukonko/tablewriter"
-	"github.com/toumorokoshi/go-fuzzy/fuzzy"
 )
 
 var version = "0.5.3"
@@ -132,7 +128,7 @@ func main() {
 			Name:  "set",
 			Usage: "Set a property or view all values of a profile (provide no key/value)",
 			Action: func(context *cli.Context) {
-				actionViewConfig(profile.Load(currentUsername, context, true))
+				actions.ViewConfig(profile.Load(currentUsername, context, true))
 			},
 			Subcommands: []cli.Command{
 				{
@@ -291,14 +287,14 @@ func main() {
 				},
 			},
 			Action: func(context *cli.Context) {
-				exit(actionAlias(profile.Load(currentUsername, context, true)))
+				exit(actions.Alias(profile.Load(currentUsername, context, true)))
 			},
 		},
 		{
 			Name:  "status",
 			Usage: "display the status of all ec2 instances",
 			Action: func(context *cli.Context) {
-				exit(actionStatus(profile.Load(currentUsername, context, true)))
+				exit(actions.Status(profile.Load(currentUsername, context, true)))
 			},
 		},
 		{
@@ -307,9 +303,9 @@ func main() {
 			Action: func(context *cli.Context) {
 				profile := profile.Load(currentUsername, context, true)
 				if len(context.Args()) != 1 {
-					exit(actionListInstances(profile, ""))
+					exit(actions.ListInstances(profile, ""))
 				} else {
-					exit(actionSSH(profile, context.Args().First()))
+					exit(actions.SSH(profile, trimSurroundingQuotes(context.Args().First())))
 				}
 			},
 			Flags: []cli.Flag{
@@ -325,132 +321,10 @@ func main() {
 
 				profile := profile.Load(currentUsername, c, true)
 				tag := c.String("tag")
-				exit(actionListInstances(profile, tag))
+				exit(actions.ListInstances(profile, tag))
 			},
 		},
 	}
 
 	app.Run(os.Args)
-}
-
-func actionListInstances(profile *profile.Profile, fuzzyTag string) error {
-	instances, err := instances.GetAll(profile)
-	for name := range instances {
-		if fuzzyTag == "" || fuzzy.SequenceMatch(fuzzyTag, name) {
-			fmt.Println(name)
-		}
-	}
-
-	return err
-}
-
-func actionViewConfig(profile *profile.Profile) {
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Key", "Value"})
-
-	table.Append([]string{"Name", profile.Name()})
-	table.Append([]string{"Region", profile.Region()})
-	table.Append([]string{"User", profile.User()})
-	table.Append([]string{"Cert", profile.CertLocation()})
-	table.Append([]string{"MaxCacheAge", fmt.Sprintf("%d", profile.MaxCacheAge())})
-	table.Append([]string{"Alias", profile.AliasPrefix()})
-	table.Append([]string{"AWSProfile", profile.AWSProfile()})
-	table.Append([]string{"AWSAccessKey", profile.AWSSecretKey()})
-	table.Append([]string{"AWSSecretKey", profile.AWSAccessKey()})
-	table.Append([]string{"BaseDir", profile.BaseDir()})
-
-	table.Render()
-}
-
-func templateSSHUsernameAtHost(user string, host string) string {
-	return fmt.Sprintf("%s@%s", user, host)
-}
-
-func createSSHCmd(profile *profile.Profile, instance *instances.Instance) *exec.Cmd {
-	var cmd *exec.Cmd
-	usernameAtHost := templateSSHUsernameAtHost(profile.User(), instance.PublicDNSName)
-
-	if certLocation := profile.CertLocation(); certLocation != "" {
-		cmd = exec.Command("ssh", "-i", certLocation, usernameAtHost)
-	} else {
-		cmd = exec.Command("ssh", usernameAtHost)
-	}
-
-	log.Debug("created command", cmd)
-	return cmd
-}
-
-func actionSSH(profile *profile.Profile, hostName string) error {
-	instance, err := instances.FindByHostname(profile, trimSurroundingQuotes(hostName))
-
-	if err == nil {
-		cmd := createSSHCmd(profile, instance)
-		cmd.Stdin = os.Stdin
-		cmd.Stderr = os.Stderr
-		cmd.Stdout = os.Stdout
-
-		log.Info("connecting..")
-		if err = cmd.Start(); err == nil {
-			err = cmd.Wait()
-		}
-	}
-
-	return err
-}
-
-func actionStatus(profile *profile.Profile) error {
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Id", "Name", "Cert", "Type", "URL"})
-
-	instances, err := instances.GetAll(profile)
-	for _, instance := range instances {
-		table.Append([]string{
-			instance.ID, instance.Name,
-			instance.CertName, instance.InstanceType,
-			instance.PublicDNSName,
-		})
-	}
-
-	if err != nil {
-		table.Render()
-	}
-
-	return err
-}
-
-func templateSSHCertLocation(profile *profile.Profile) (string, error) {
-	location := ""
-
-	if certLocation := profile.CertLocation(); certLocation != "" {
-		if _, err := os.Stat(certLocation); err != nil {
-			log.Error("Cannot find certificate", certLocation)
-			return "", err
-		}
-
-		location = fmt.Sprintf(" -i %s", certLocation)
-	}
-
-	return location, nil
-}
-
-func actionAlias(profile *profile.Profile) error {
-	sshCertificateLocation, err := templateSSHCertLocation(profile)
-	if err != nil {
-		return err
-	}
-
-	user := profile.User()
-	prefix := profile.AliasPrefix()
-	instances, err := instances.GetAll(profile)
-
-	for _, instance := range instances {
-		name := fmt.Sprintf("%s_%s", instance.Name, instance.ID)
-
-		fmt.Println(fmt.Sprintf(
-			"alias %s%s=\"ssh%s %s@%s\"", prefix, strings.ToLower(name),
-			sshCertificateLocation, user, instance.PublicDNSName,
-		))
-	}
-
-	return err
 }
