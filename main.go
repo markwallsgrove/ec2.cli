@@ -2,20 +2,18 @@ package main
 
 import (
 	"fmt"
-	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"os/user"
 	"strings"
 
 	"github.com/codegangsta/cli"
-	"github.com/kardianos/osext"
+	"github.com/markwallsgrove/ec2.cli/install"
 	"github.com/markwallsgrove/ec2.cli/instances"
+	"github.com/markwallsgrove/ec2.cli/logging"
 	"github.com/markwallsgrove/ec2.cli/profile"
 	"github.com/markwallsgrove/ec2.cli/update"
 	"github.com/olekukonko/tablewriter"
-	"github.com/op/go-logging"
 	"github.com/toumorokoshi/go-fuzzy/fuzzy"
 )
 
@@ -24,16 +22,9 @@ var homeDir string
 var currentUsername string
 var baseDir string
 
-var log = logging.MustGetLogger("ec2.cli")
-var logFormat = logging.MustStringFormatter(
-	`%{color}%{time:15:04:05.000} %{shortfunc} ▶ %{level:.4s} %{id:03x}%{color:reset} %{message}`,
-)
-var backend = logging.NewLogBackend(os.Stderr, "", 0)
-var formatter = logging.NewBackendFormatter(backend, logFormat)
+var log = logging.Log
 
 func init() {
-	logging.SetBackend(formatter)
-
 	currentUser, err := user.Current()
 	if err != nil {
 		log.Error("Cannot retrieve current user", err)
@@ -46,36 +37,6 @@ func init() {
 	log.Debug("base directory", baseDir)
 	log.Debug("current user", currentUsername)
 }
-
-var bashrcCall = []byte(`
-if [ -f ~/.ec2.cli/completion.bash ]; then
-	export PATH="$PATH:$HOME/.ec2.cli"
-    . ~/.ec2.cli/completion.bash
-fi
-`)
-
-var bashAutoComplete = []byte(`#! /bin/bash
-_cli_bash_autocomplete() {
-     local cur opts base
-     COMPREPLY=()
-     cur="${COMP_WORDS[COMP_CWORD]}"
-     opts=$( ${COMP_WORDS[@]:0:$COMP_CWORD} --generate-bash-completion )
-     COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
-     return 0
-}
-
-complete -F _cli_bash_autocomplete ec2.cli
-`)
-
-var zshAutoComplete = []byte(`
-autoload -U compinit && compinit
-autoload -U bashcompinit && bashcompinit
-
-export PATH="$PATH:$HOME/.ec2.cli"
-if [ -f ~/.ec2.cli/completion.bash ]; then
-	source ~/.ec2.cli/completion.bash
-fi
-`)
 
 func trimSurroundingQuotes(str string) string {
 	if str == "" {
@@ -135,23 +96,23 @@ func main() {
 		cli.StringFlag{
 			Name:   "profile",
 			Value:  "default",
-			Usage:  "profile.Load to use",
+			Usage:  "profile to use",
 			EnvVar: "AE_DEFAULT_PROFILE",
 		},
 		cli.StringFlag{
-			Name: "awsprofile.Load",
-			Usage: "Use a certain AWS profile.Load when communicating with AWS. " +
+			Name: "awsProfile",
+			Usage: "Use a certain AWS profile when communicating with AWS. " +
 				"This will be used if awsAccessKey and/or awsSecretKey are not defined",
 		},
 		cli.StringFlag{
 			Name: "awsAccessKey",
 			Usage: "AWS Access Key to use when communicating with AWS. If awsAccessKey " +
-				"and awsSecretKey are defined, they override awsprofile.Load",
+				"and awsSecretKey are defined, they override awsProfile",
 		},
 		cli.StringFlag{
 			Name: "awsSecretKey",
 			Usage: "AWS Secret Key to use when communicating with AWS. If awsAccessKey" +
-				"and awsSecretKey are defined, they ovveride awsprofile.Load",
+				"and awsSecretKey are defined, they ovveride awsProfile",
 		},
 		cli.StringFlag{
 			Name:   "baseDir",
@@ -181,7 +142,7 @@ func main() {
 						profile := profile.Load(currentUsername, context, false)
 
 						if len(context.Args()) != 1 {
-							exit("invalid amount of arguments, expected awsprofile.Load")
+							exit("invalid amount of arguments, expected aws secret key")
 						}
 
 						profile.SetAWSSecretKey(context.Args().First())
@@ -197,7 +158,7 @@ func main() {
 						profile := profile.Load(currentUsername, context, false)
 
 						if len(context.Args()) != 1 {
-							exit("invalid amount of arguments, expected awsprofile.Load")
+							exit("invalid amount of arguments, expected aws access key")
 						}
 
 						profile.SetAWSAccessKey(context.Args().First())
@@ -207,13 +168,13 @@ func main() {
 					},
 				},
 				{
-					Name:  "awsprofile.Load",
+					Name:  "awsProfile",
 					Usage: "AWS profile to use",
 					Action: func(context *cli.Context) {
 						profile := profile.Load(currentUsername, context, false)
 
 						if len(context.Args()) != 1 {
-							exit("invalid amount of arguments, expected awsprofile.Load")
+							exit("invalid amount of arguments, expected awsProfile")
 						}
 
 						profile.SetAWSProfile(context.Args().First())
@@ -316,7 +277,7 @@ func main() {
 			Name:  "setup",
 			Usage: "Setup auto complete",
 			Action: func(context *cli.Context) {
-				exit(actionSetup())
+				exit(install.Install(profile.Load(currentUsername, context, true)))
 			},
 		},
 		{
@@ -372,7 +333,7 @@ func main() {
 	app.Run(os.Args)
 }
 
-func actionListInstances(profile profile.Profile, fuzzyTag string) error {
+func actionListInstances(profile *profile.Profile, fuzzyTag string) error {
 	instances, err := instances.GetAll(profile)
 	for name := range instances {
 		if fuzzyTag == "" || fuzzy.SequenceMatch(fuzzyTag, name) {
@@ -383,7 +344,7 @@ func actionListInstances(profile profile.Profile, fuzzyTag string) error {
 	return err
 }
 
-func actionViewConfig(profile profile.Profile) {
+func actionViewConfig(profile *profile.Profile) {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Key", "Value"})
 
@@ -401,103 +362,11 @@ func actionViewConfig(profile profile.Profile) {
 	table.Render()
 }
 
-func writeConfig(loc string, content []byte) error {
-	if _, err := os.Stat(loc); os.IsNotExist(err) {
-		ioutil.WriteFile(loc, content, 0770)
-		fmt.Println(fmt.Sprintf("created %s", loc))
-		return nil
-	}
-
-	config, err := os.OpenFile(loc, os.O_APPEND|os.O_WRONLY, 0770)
-	if err != nil {
-		return err
-	}
-
-	defer config.Close()
-
-	if _, err = config.Write(content); err != nil {
-		return err
-	}
-
-	if err = os.Chmod(loc, 0770); err != nil {
-		return err
-	}
-
-	fmt.Println(fmt.Sprintf("appended to %s", loc))
-	return nil
-}
-
-func cp(src, dst string) error {
-	s, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-
-	defer s.Close()
-	d, err := os.Create(dst)
-
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.Copy(d, s); err != nil {
-		d.Close()
-		return err
-	}
-
-	return d.Close()
-}
-
-func actionSetup() error {
-	aeCompletionLoc := fmt.Sprintf("%s/completion.bash", baseDir)
-	aeExecLoc := fmt.Sprintf("%s/ec2.cli", baseDir)
-	bashrcLoc := fmt.Sprintf("%s/.bashrc", homeDir)
-	bashProfileLoc := fmt.Sprintf("%s/.bash_profile", homeDir)
-	zshrcLoc := fmt.Sprintf("%s/.zshrc", homeDir)
-
-	if err := os.Mkdir(baseDir, 0775); os.IsExist(err) {
-		return fmt.Errorf("ec2.cli is already installed, remove %s and try again", baseDir)
-	} else if err != nil {
-		return err
-	} else {
-		log.Debug(fmt.Sprintf("created %s", baseDir))
-	}
-
-	currExecLoc, _ := osext.Executable()
-	if err := cp(currExecLoc, aeExecLoc); err != nil {
-		return err
-	}
-
-	if err := os.Chmod(aeExecLoc, 0775); err != nil {
-		return err
-	}
-
-	if err := ioutil.WriteFile(aeCompletionLoc, bashAutoComplete, 0775); err != nil {
-		return err
-	}
-
-	if _, err := os.Stat(bashProfileLoc); err == nil {
-		if err := writeConfig(bashProfileLoc, bashrcCall); err != nil {
-			return err
-		}
-	} else if err := writeConfig(bashrcLoc, bashrcCall); err != nil {
-		return err
-	}
-
-	if _, err := os.Stat(zshrcLoc); err == nil {
-		if err = writeConfig(zshrcLoc, zshAutoComplete); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 func templateSSHUsernameAtHost(user string, host string) string {
 	return fmt.Sprintf("%s@%s", user, host)
 }
 
-func createSSHCmd(profile profile.Profile, instance *instances.Instance) *exec.Cmd {
+func createSSHCmd(profile *profile.Profile, instance *instances.Instance) *exec.Cmd {
 	var cmd *exec.Cmd
 	usernameAtHost := templateSSHUsernameAtHost(profile.User(), instance.PublicDNSName)
 
@@ -511,7 +380,7 @@ func createSSHCmd(profile profile.Profile, instance *instances.Instance) *exec.C
 	return cmd
 }
 
-func actionSSH(profile profile.Profile, hostName string) error {
+func actionSSH(profile *profile.Profile, hostName string) error {
 	instance, err := instances.FindByHostname(profile, trimSurroundingQuotes(hostName))
 
 	if err == nil {
@@ -529,7 +398,7 @@ func actionSSH(profile profile.Profile, hostName string) error {
 	return err
 }
 
-func actionStatus(profile profile.Profile) error {
+func actionStatus(profile *profile.Profile) error {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Id", "Name", "Cert", "Type", "URL"})
 
@@ -549,7 +418,7 @@ func actionStatus(profile profile.Profile) error {
 	return err
 }
 
-func templateSSHCertLocation(profile profile.Profile) (string, error) {
+func templateSSHCertLocation(profile *profile.Profile) (string, error) {
 	location := ""
 
 	if certLocation := profile.CertLocation(); certLocation != "" {
@@ -564,7 +433,7 @@ func templateSSHCertLocation(profile profile.Profile) (string, error) {
 	return location, nil
 }
 
-func actionAlias(profile profile.Profile) error {
+func actionAlias(profile *profile.Profile) error {
 	sshCertificateLocation, err := templateSSHCertLocation(profile)
 	if err != nil {
 		return err

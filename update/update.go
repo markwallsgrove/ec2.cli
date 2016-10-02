@@ -15,11 +15,12 @@ import (
 	"strings"
 
 	update "github.com/inconshreveable/go-update"
-	logging "github.com/op/go-logging"
+	"github.com/markwallsgrove/ec2.cli/logging"
 )
 
-var releasesAPI string = "https://api.github.com/repos/markwallsgrove/ssh_alias_ec2/releases"
-var version string = "0.5.3"
+var log = logging.Log
+var releasesAPI = "https://api.github.com/repos/markwallsgrove/ssh_alias_ec2/releases"
+var version = "0.5.3"
 
 var publicKey = []byte(`
 -----BEGIN PUBLIC KEY-----
@@ -35,17 +36,6 @@ var forwardAssetFilePattern = regexp.MustCompile(fmt.Sprintf(
 var backwardsAssetFilePattern = regexp.MustCompile(fmt.Sprintf(
 	"/b-%s-%s\\.(hash|sig|diff)$", runtime.GOOS, runtime.GOARCH,
 ))
-
-var log = logging.MustGetLogger("ec2.cli")
-var logFormat = logging.MustStringFormatter(
-	`%{color}%{time:15:04:05.000} %{shortfunc} ▶ %{level:.4s} %{id:03x}%{color:reset} %{message}`,
-)
-var backend = logging.NewLogBackend(os.Stderr, "", 0)
-var formatter = logging.NewBackendFormatter(backend, logFormat)
-
-func init() {
-	logging.SetBackend(formatter)
-}
 
 func downloadFile(uri string, loc string, errChannel chan error) {
 	log.Debug("downloading", uri, "to", loc)
@@ -75,12 +65,14 @@ func downloadFile(uri string, loc string, errChannel chan error) {
 	errChannel <- errors.New("")
 }
 
+// Release represents a ec2.cli release
 type Release struct {
 	Version string  `json:"tag_name"`
 	Body    string  `json:"body"`
 	Assets  []Asset `json:"assets"`
 }
 
+// DownloadAssets downloads all assets related to a given version
 func (release *Release) DownloadAssets(pattern regexp.Regexp, location string) error {
 	if len(release.Assets) == 0 {
 		return errors.New("Release contains zero assets")
@@ -89,12 +81,12 @@ func (release *Release) DownloadAssets(pattern regexp.Regexp, location string) e
 	downloading := 0
 	errChannel := make(chan error)
 	for _, asset := range release.Assets {
-		if pattern.MatchString(asset.DownloadUrl) == false {
+		if pattern.MatchString(asset.DownloadURL) == false {
 			continue
 		}
 
-		go downloadFile(asset.DownloadUrl, path.Join(location, asset.Name), errChannel)
-		downloading += 1
+		go downloadFile(asset.DownloadURL, path.Join(location, asset.Name), errChannel)
+		downloading++
 	}
 
 	var err error
@@ -113,9 +105,10 @@ func (release *Release) DownloadAssets(pattern regexp.Regexp, location string) e
 	return nil
 }
 
+// Asset related to a release
 type Asset struct {
 	Name        string `json:"name"`
-	DownloadUrl string `json:"browser_download_url"`
+	DownloadURL string `json:"browser_download_url"`
 }
 
 func getReleases() ([]Release, error) {
@@ -149,6 +142,7 @@ func getNextRelease(releases []Release, version string, downgrade bool) (Release
 	return Release{}, false, false
 }
 
+// Patch the current binary by either progressing or regressing
 func Patch(downgrade bool) error {
 	releases, err := getReleases()
 	if err != nil {

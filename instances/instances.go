@@ -13,22 +13,12 @@ import (
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/markwallsgrove/ec2.cli/logging"
 	"github.com/markwallsgrove/ec2.cli/profile"
-	logging "github.com/op/go-logging"
 )
 
+var log = logging.Log
 var regexWhiteChars = regexp.MustCompile("[^a-zA-Z0-9]")
-
-var log = logging.MustGetLogger("ec2.cli")
-var logFormat = logging.MustStringFormatter(
-	`%{color}%{time:15:04:05.000} %{shortfunc} ▶ %{level:.4s} %{id:03x}%{color:reset} %{message}`,
-)
-var backend = logging.NewLogBackend(os.Stderr, "", 0)
-var formatter = logging.NewBackendFormatter(backend, logFormat)
-
-func init() {
-	logging.SetBackend(formatter)
-}
 
 // Instance represents an ec2 instance meta data
 type Instance struct {
@@ -46,7 +36,7 @@ func (i *Instance) getNormalisedName() string {
 }
 
 // FindByHostname filter the ec2 meta data by the hostname
-func FindByHostname(profile profile.Profile, hostName string) (*Instance, error) {
+func FindByHostname(profile *profile.Profile, hostName string) (*Instance, error) {
 	instances, err := GetAll(profile)
 	instance := &Instance{}
 
@@ -65,7 +55,7 @@ func FindByHostname(profile profile.Profile, hostName string) (*Instance, error)
 }
 
 // GetAll retreive all meta data representing ec2 instances
-func GetAll(profile profile.Profile) (map[string]*Instance, error) {
+func GetAll(profile *profile.Profile) (map[string]*Instance, error) {
 	instances := getInstanceCache(profile)
 
 	if len(instances) > 0 {
@@ -121,7 +111,7 @@ func GetAll(profile profile.Profile) (map[string]*Instance, error) {
 	return instances, storeInstanceCache(profile, instances)
 }
 
-func getInstanceCache(profile profile.Profile) map[string]*Instance {
+func getInstanceCache(profile *profile.Profile) map[string]*Instance {
 	cache := map[string]*Instance{}
 
 	cacheLocation := fmt.Sprintf("%s/cache/%s_%s.cache", profile.BaseDir(), profile.Name(), profile.Region())
@@ -158,7 +148,7 @@ func getInstanceCache(profile profile.Profile) map[string]*Instance {
 	return cache
 }
 
-func storeInstanceCache(profile profile.Profile, cache map[string]*Instance) error {
+func storeInstanceCache(profile *profile.Profile, cache map[string]*Instance) error {
 	if err := os.MkdirAll(fmt.Sprintf("%s/cache", profile.BaseDir()), 0770); err != nil {
 		log.Error("cannot create cache directory,", err)
 		return err
@@ -181,7 +171,7 @@ func storeInstanceCache(profile profile.Profile, cache map[string]*Instance) err
 	return ioutil.WriteFile(cacheLocation, buffer.Bytes(), 0770)
 }
 
-func getAWSConfiguration(profile profile.Profile) aws.Config {
+func getAWSConfiguration(profile *profile.Profile) aws.Config {
 	awsCredentialsLoc := fmt.Sprintf("%s/.aws/credentials", profile.HomeDir())
 	var creds *credentials.Credentials
 

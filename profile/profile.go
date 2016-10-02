@@ -8,15 +8,10 @@ import (
 	"strconv"
 
 	"github.com/codegangsta/cli"
-	logging "github.com/op/go-logging"
+	"github.com/markwallsgrove/ec2.cli/logging"
 )
 
-var log = logging.MustGetLogger("ec2.cli")
-var logFormat = logging.MustStringFormatter(
-	`%{color}%{time:15:04:05.000} %{shortfunc} ▶ %{level:.4s} %{id:03x}%{color:reset} %{message}`,
-)
-var backend = logging.NewLogBackend(os.Stderr, "", 0)
-var formatter = logging.NewBackendFormatter(backend, logFormat)
+var log = logging.Log
 
 func trimSurroundingQuotes(str string) string {
 	if str == "" {
@@ -248,7 +243,7 @@ func loadProfileFromFile(location string, currentUsername string, context *cli.C
 
 // Load the user's profile by mixing environment variables, saved JSON
 // data && command line specified attributes.
-func Load(username string, context *cli.Context, useEnvValues bool) Profile {
+func Load(username string, context *cli.Context, useEnvValues bool) *Profile {
 	location := fmt.Sprintf("%s/config/%s.json", context.GlobalString("baseDir"), context.GlobalString("profile"))
 	profile, err := loadProfileFromFile(location, username, context)
 
@@ -257,9 +252,9 @@ func Load(username string, context *cli.Context, useEnvValues bool) Profile {
 	}
 
 	if useEnvValues == false {
-		return profile
+		return &profile
 	}
 
 	log.Debug("constructed profile", fmt.Sprintf("%+v\n", profile))
-	return profile
+	return &profile
 }
