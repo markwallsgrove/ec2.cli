@@ -97,8 +97,10 @@ func Status(profile *profile.Profile) error {
 		})
 	}
 
-	if err != nil {
+	if err == nil {
 		table.Render()
+	} else {
+		log.Error("Unable to retrieve instances", err)
 	}
 
 	return err
