@@ -1,19 +1,18 @@
 package profile
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"os"
 	"strconv"
+	"strings"
 
-	"github.com/codegangsta/cli"
 	"github.com/markwallsgrove/ec2.cli/logging"
+	"github.com/markwallsgrove/ec2.cli/marshaller"
 )
 
 var log = logging.Log
 
 func trimSurroundingQuotes(str string) string {
+	// TODO: trim white space, double and single quotes
 	if str == "" {
 		return str
 	}
@@ -26,9 +25,18 @@ func trimSurroundingQuotes(str string) string {
 	return str
 }
 
+// UserContext provided by the user interface
+type UserContext interface {
+	GlobalString(string) string
+	GlobalInt(string) int
+	GlobalBool(string) bool
+	String(string) string
+}
+
 // Profile structure to hold the context and profile data
 type Profile struct {
-	context *cli.Context
+	marshaller.FileMarshaller
+	context UserContext
 	data    *Data
 }
 
@@ -73,10 +81,10 @@ func (p *Profile) SetHomeDir(homeDir string) {
 // Region that aws will located the ec2 instance within
 func (p *Profile) Region() string {
 	if region := trimSurroundingQuotes(p.context.GlobalString("region")); region != "" {
-		return region
+		return strings.ToLower(region)
 	}
 
-	return p.data.Region
+	return strings.ToLower(p.data.Region)
 }
 
 // SetRegion define the region to use when retreiving
@@ -196,65 +204,38 @@ func (p *Profile) getGlobalContextValue(name string, defaultValue string) string
 // Save the current profile values to a profile held within the base
 // directory
 func (p *Profile) Save() error {
-	if err := os.MkdirAll(fmt.Sprintf("%s/config", p.BaseDir()), 0770); err != nil {
-		return err
-	}
-
-	configLoc := fmt.Sprintf("%s/config/%s.json", p.BaseDir(), p.Name())
-	configBytes, err := json.MarshalIndent(p, "", "    ")
-	log.Debug("saving profile to", configLoc)
-
-	if err != nil {
-		return err
-	}
-
-	return ioutil.WriteFile(configLoc, configBytes, 0775)
+	return p.Marshall(p.ProfileLocation())
 }
 
-func loadProfileFromFile(location string, currentUsername string, context *cli.Context) (Profile, error) {
-	profile := Data{
+// ProfileLocation return the expected location of the profile from the context information
+func (p *Profile) ProfileLocation() string {
+	return fmt.Sprintf(
+		"%s/config/%s.json",
+		p.context.GlobalString("baseDir"),
+		p.context.GlobalString("profile"),
+	)
+
+}
+
+// Load content from a file
+func (p *Profile) Load() error {
+	return p.Unmarshall(p.ProfileLocation())
+}
+
+// Create the user's profile by mixing environment variables, saved JSON
+// data && command line specified attributes.
+func Create(username string, context UserContext) *Profile {
+	data := Data{
 		Region:      "eu-west-1",
-		User:        currentUsername,
+		User:        username,
 		MaxCacheAge: 300,
 	}
 
-	log.Debug("loading profile from", location)
-
-	if _, err := os.Stat(location); err != nil {
-		return Profile{}, err
+	profile := Profile{
+		&marshaller.JSONFile{},
+		context,
+		&data,
 	}
 
-	profileBytes, err := ioutil.ReadFile(location)
-	if err != nil {
-		log.Error("could not load profile", err)
-		return Profile{}, err
-	}
-
-	// TODO: this is not working
-	log.Debug("profile data from file", string(profileBytes))
-	if err = json.Unmarshal(profileBytes, &profile); err != nil {
-		log.Error("could not unmarshal profile", err)
-		return Profile{}, err
-	}
-
-	log.Debug("loaded profile successfully", fmt.Sprintf("%+v", profile))
-	return Profile{data: &profile, context: context}, nil
-}
-
-// Load the user's profile by mixing environment variables, saved JSON
-// data && command line specified attributes.
-func Load(username string, context *cli.Context, useEnvValues bool) *Profile {
-	location := fmt.Sprintf("%s/config/%s.json", context.GlobalString("baseDir"), context.GlobalString("profile"))
-	profile, err := loadProfileFromFile(location, username, context)
-
-	if err != nil {
-		log.Error("Cannot load profile from", location, "due to", err)
-	}
-
-	if useEnvValues == false {
-		return &profile
-	}
-
-	log.Debug("constructed profile", fmt.Sprintf("%+v\n", profile))
 	return &profile
 }
