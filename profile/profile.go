@@ -232,7 +232,7 @@ func Create(username string, context UserContext) *Profile {
 	}
 
 	profile := Profile{
-		&marshaller.JSONFile{},
+		marshaller.JSONFile{},
 		context,
 		&data,
 	}
